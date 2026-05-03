@@ -1,1 +1,867 @@
-# Knowie-admin
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Knowie — Admin</title>
+<link href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@400;600&family=DM+Sans:wght@300;400;500&display=swap" rel="stylesheet">
+
+<script type="module">
+import { initializeApp }       from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
+import { getFirestore, collection, addDoc, getDocs, updateDoc, deleteDoc, doc, serverTimestamp, query, orderBy }
+                               from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
+import { getStorage, ref, uploadBytes, getDownloadURL }
+                               from "https://www.gstatic.com/firebasejs/10.12.0/firebase-storage.js";
+
+const firebaseConfig = {
+  apiKey: "AIzaSyAd67RhjiBm6Da8Rp5cVhpkA_Tk47_6k6Y",
+  authDomain: "knowie-77fde.firebaseapp.com",
+  projectId: "knowie-77fde",
+  storageBucket: "knowie-77fde.firebasestorage.app",
+  messagingSenderId: "427764303215",
+  appId: "1:427764303215:web:0240a51884d17c6a49149a"
+};
+
+const app     = initializeApp(firebaseConfig);
+const db      = getFirestore(app);
+// Storage = l'endroit où Firebase stocke les fichiers (images, etc.)
+const storage = getStorage(app);
+
+// ─── ÉTAT GLOBAL ───────────────────────────────────────────────
+// Ces variables gardent en mémoire les données chargées
+// et l'id du sujet qu'on est en train de modifier
+let allDomains  = [];   // ex: { id, name, emoji }
+let allThemes   = [];   // ex: { id, name, domainId, emoji }
+let editingId   = null; // null = nouveau sujet, sinon = id Firestore
+let quizItems   = [];   // liste des questions du quiz
+
+// ─── CHARGEMENT DES DONNÉES ────────────────────────────────────
+
+async function loadDomains() {
+  const snap = await getDocs(collection(db, "domains"));
+  allDomains = [];
+  snap.forEach(d => allDomains.push({ id: d.id, ...d.data() }));
+  return allDomains;
+}
+
+async function loadThemes() {
+  const snap = await getDocs(collection(db, "themes"));
+  allThemes = [];
+  snap.forEach(d => allThemes.push({ id: d.id, ...d.data() }));
+  return allThemes;
+}
+
+async function loadSubjects() {
+  try {
+    const q = query(collection(db, "subjects"), orderBy("createdAt", "desc"));
+    const snap = await getDocs(q);
+    const subjects = [];
+    snap.forEach(d => subjects.push({ id: d.id, ...d.data() }));
+    return subjects;
+  } catch(e) { return []; }
+}
+
+// ─── UPLOAD IMAGE ──────────────────────────────────────────────
+// Quand tu sélectionnes une image, on l'envoie dans Firebase Storage
+// et on récupère son URL publique pour l'afficher dans l'app
+async function uploadImage(file, progressEl) {
+  // On crée un chemin unique pour l'image grâce à la date
+  // ex: "subjects/images/1715000000000_photo.jpg"
+  const path      = `subjects/images/${Date.now()}_${file.name}`;
+  const storageRef = ref(storage, path);
+
+  progressEl.textContent = "Envoi en cours...";
+  progressEl.style.display = "block";
+
+  // uploadBytes = envoie le fichier vers Firebase Storage
+  await uploadBytes(storageRef, file);
+
+  // getDownloadURL = récupère le lien public vers l'image
+  const url = await getDownloadURL(storageRef);
+  progressEl.textContent = "✓ Image uploadée";
+  setTimeout(() => { progressEl.style.display = "none"; }, 2000);
+  return url;
+}
+
+// ─── SAUVEGARDE SUJET ──────────────────────────────────────────
+async function saveSubject() {
+  const btn = document.getElementById('save-subject-btn');
+
+  // Lecture de tous les champs du formulaire
+  const data = {
+    title        : v('f-title'),
+    concept      : v('f-concept'),
+    explanation  : v('f-explanation'),
+    dailyLife    : v('f-daily'),
+    example      : v('f-example'),
+    popCulture   : v('f-pop'),
+    keywords     : v('f-keywords').split(/[,\n]/).map(s => s.trim()).filter(Boolean),
+    // .split = découpe la chaîne en tableau
+    // .map + .trim = enlève les espaces en trop
+    // .filter(Boolean) = supprime les éléments vides
+    domainId     : v('f-domain'),
+    themeId      : v('f-theme'),
+    level        : v('f-level'),
+    status       : v('f-status'),
+    isPremium    : v('f-premium') === 'premium',
+    imageUrl     : v('f-image-url'),
+    quiz         : quizItems,
+    updatedAt    : serverTimestamp()
+  };
+
+  if (!data.title || !data.domainId || !data.themeId) {
+    showToast("Titre, domaine et thème sont obligatoires", "error"); return;
+  }
+
+  btn.textContent = "Enregistrement...";
+  btn.disabled = true;
+
+  try {
+    if (editingId) {
+      await updateDoc(doc(db, "subjects", editingId), data);
+    } else {
+      await addDoc(collection(db, "subjects"), { ...data, createdAt: serverTimestamp() });
+    }
+    closeSubjectForm();
+    await refreshSubjects();
+    showToast(editingId ? "Sujet mis à jour ✓" : "Sujet créé dans Firebase ✓", "success");
+    editingId = null;
+  } catch(e) {
+    showToast("Erreur Firebase — ouvre F12 pour voir", "error");
+    console.error(e);
+  }
+
+  btn.textContent = "Enregistrer la fiche";
+  btn.disabled = false;
+}
+
+// ─── QUIZ BUILDER ──────────────────────────────────────────────
+// Chaque question est un objet : { question, options: [{text, correct}] }
+
+function addQuizQuestion() {
+  quizItems.push({ question: "", options: [
+    { text: "", correct: false },
+    { text: "", correct: false },
+    { text: "", correct: false }
+  ]});
+  renderQuiz();
+}
+
+function removeQuizQuestion(i) {
+  quizItems.splice(i, 1);
+  renderQuiz();
+}
+
+function renderQuiz() {
+  const container = document.getElementById('quiz-container');
+  if (quizItems.length === 0) {
+    container.innerHTML = '<div class="empty-quiz">Aucune question — clique sur "Ajouter une question"</div>';
+    return;
+  }
+  container.innerHTML = quizItems.map((q, i) => `
+    <div class="quiz-card">
+      <div class="quiz-card-header">
+        <span class="quiz-num">Q${i+1}</span>
+        <button class="icon-btn del-btn" onclick="removeQuizQuestion(${i})">✕</button>
+      </div>
+      <input class="form-input" placeholder="La question..." value="${escHtml(q.question)}"
+        oninput="quizItems[${i}].question = this.value">
+      <div class="quiz-options">
+        ${q.options.map((opt, j) => `
+          <div class="quiz-option">
+            <input type="radio" name="correct-${i}" ${opt.correct ? 'checked' : ''}
+              onchange="quizItems[${i}].options.forEach((o,k)=>o.correct=k===${j})">
+            <input class="form-input" placeholder="Réponse ${j+1}" value="${escHtml(opt.text)}"
+              oninput="quizItems[${i}].options[${j}].text = this.value">
+          </div>
+        `).join('')}
+      </div>
+      <div class="quiz-hint">Coche le bouton radio à gauche de la bonne réponse</div>
+    </div>
+  `).join('');
+}
+
+// ─── DOMAINES & THÈMES ─────────────────────────────────────────
+async function saveDomain() {
+  const name = v('d-name');
+  if (!name) { showToast("Le nom est obligatoire", "error"); return; }
+  await addDoc(collection(db, "domains"), { name, active: true, createdAt: serverTimestamp() });
+  document.getElementById('d-name').value = '';
+  await refreshAll();
+  showToast("Domaine créé ✓", "success");
+}
+
+async function saveTheme() {
+  const name     = v('t-name');
+  const domainId = v('t-domain');
+  if (!name || !domainId) { showToast("Nom et domaine requis", "error"); return; }
+  await addDoc(collection(db, "themes"), { name, domainId, active: true, createdAt: serverTimestamp() });
+  document.getElementById('t-name').value = '';
+  await refreshAll();
+  showToast("Thème créé ✓", "success");
+}
+
+// ─── AFFICHAGE ─────────────────────────────────────────────────
+
+async function refreshAll() {
+  await loadDomains();
+  await loadThemes();
+  renderDomainTree();
+  populateSelects();
+}
+
+async function refreshSubjects() {
+  const tbody = document.getElementById('subjects-tbody');
+  tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;padding:24px;color:var(--text-muted)">Chargement...</td></tr>';
+  const subjects = await loadSubjects();
+  document.getElementById('subjects-count').textContent = subjects.length + " fiches";
+
+  if (subjects.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;padding:40px;color:var(--text-muted)">Aucune fiche — crée la première !</td></tr>';
+    return;
+  }
+
+  tbody.innerHTML = subjects.map(s => {
+    const domain = allDomains.find(d => d.id === s.domainId);
+    const theme  = allThemes.find(t => t.id === s.themeId);
+    return `<tr data-id="${s.id}">
+      <td>
+        ${s.imageUrl ? `<img src="${escHtml(s.imageUrl)}" style="width:36px;height:36px;object-fit:cover;border-radius:6px;vertical-align:middle;margin-right:8px;">` : ''}
+        <span class="primary">${escHtml(s.title)}</span>
+      </td>
+      <td><span class="domain-pill">${domain ? escHtml(domain.name) : '—'}</span></td>
+      <td><span class="theme-pill">${theme ? escHtml(theme.name) : '—'}</span></td>
+      <td>${statusPill(s.status)}</td>
+      <td>${s.isPremium ? '<span class="pill pill-orange">★ Premium</span>' : '—'}</td>
+      <td><div class="row-actions">
+        <button class="icon-btn edit-btn" onclick="openEditSubject('${s.id}')" title="Modifier">✎</button>
+        <button class="icon-btn del-btn"  onclick="confirmDelete('${s.id}')"   title="Supprimer">✕</button>
+      </div></td>
+    </tr>`;
+  }).join('');
+}
+
+function renderDomainTree() {
+  const container = document.getElementById('domain-tree');
+  if (allDomains.length === 0) {
+    container.innerHTML = '<div class="empty-tree">Aucun domaine — crée le premier ci-dessous</div>';
+    return;
+  }
+  container.innerHTML = allDomains.map(d => {
+    const themes = allThemes.filter(t => t.domainId === d.id);
+    return `
+      <div class="domain-block">
+        <div class="domain-header">
+          <span class="domain-name">${escHtml(d.name)}</span>
+          <span class="theme-badge">${themes.length} thème${themes.length !== 1 ? 's' : ''}</span>
+          <div class="row-actions" style="margin-left:auto">
+            <button class="icon-btn" onclick="openEditDomain('${d.id}','${escHtml(d.name)}')" title="Renommer">✎</button>
+            <button class="icon-btn del-btn" onclick="confirmDeleteDomain('${d.id}')" title="Supprimer">✕</button>
+          </div>
+        </div>
+        <div class="themes-list">
+          ${themes.length === 0
+            ? '<span class="no-themes">Aucun thème pour l\'instant</span>'
+            : themes.map(t => `
+                <span class="theme-tag">
+                  ${escHtml(t.name)}
+                  <button class="tag-edit-btn" onclick="openEditTheme('${t.id}','${escHtml(t.name)}','${t.domainId}')" title="Modifier">✎</button>
+                  <button class="tag-del-btn"  onclick="confirmDeleteTheme('${t.id}')" title="Supprimer">✕</button>
+                </span>`).join('')
+          }
+        </div>
+      </div>`;
+  }).join('');
+}
+
+// ─── ÉDITION / SUPPRESSION DOMAINES ────────────────────────────
+
+function openEditDomain(id, currentName) {
+  const newName = prompt("Nouveau nom du domaine :", currentName);
+  if (!newName || newName.trim() === currentName) return;
+  updateDoc(doc(db, "domains", id), { name: newName.trim() })
+    .then(() => { refreshAll(); showToast("Domaine renommé ✓", "success"); })
+    .catch(() => showToast("Erreur Firebase", "error"));
+}
+
+async function confirmDeleteDomain(id) {
+  const linkedThemes = allThemes.filter(t => t.domainId === id);
+  const msg = linkedThemes.length > 0
+    ? `Ce domaine contient ${linkedThemes.length} thème(s). Les supprimer aussi ?`
+    : "Supprimer ce domaine ? Irréversible.";
+  if (!confirm(msg)) return;
+  // Supprime les thèmes liés puis le domaine
+  await Promise.all(linkedThemes.map(t => deleteDoc(doc(db, "themes", t.id))));
+  await deleteDoc(doc(db, "domains", id));
+  await refreshAll();
+  showToast("Domaine supprimé", "success");
+}
+
+// ─── ÉDITION / SUPPRESSION THÈMES ──────────────────────────────
+
+function openEditTheme(id, currentName, currentDomainId) {
+  const newName = prompt("Nouveau nom du thème :", currentName);
+  if (!newName || newName.trim() === currentName) return;
+  updateDoc(doc(db, "themes", id), { name: newName.trim() })
+    .then(() => { refreshAll(); showToast("Thème renommé ✓", "success"); })
+    .catch(() => showToast("Erreur Firebase", "error"));
+}
+
+async function confirmDeleteTheme(id) {
+  if (!confirm("Supprimer ce thème ? Les fiches associées ne seront pas supprimées mais perdront leur thème.")) return;
+  await deleteDoc(doc(db, "themes", id));
+  await refreshAll();
+  showToast("Thème supprimé", "success");
+}
+
+function populateSelects() {
+  // Menu déroulant : choisir le domaine d'un sujet
+  const fDomain = document.getElementById('f-domain');
+  fDomain.innerHTML = '<option value="">— Domaine —</option>' +
+    allDomains.map(d => `<option value="${d.id}">${escHtml(d.name)}</option>`).join('');
+
+  // Menu déroulant : choisir le domaine d'un thème (dans le formulaire thème)
+  const tDomain = document.getElementById('t-domain');
+  tDomain.innerHTML = '<option value="">— Domaine parent —</option>' +
+    allDomains.map(d => `<option value="${d.id}">${escHtml(d.name)}</option>`).join('');
+
+  // Le sélecteur de thème se met à jour quand on change le domaine
+  filterThemesByDomain();
+}
+
+// Quand on choisit un domaine dans le formulaire sujet,
+// on filtre les thèmes pour ne montrer que ceux de ce domaine
+function filterThemesByDomain() {
+  const domainId = v('f-domain');
+  const fTheme   = document.getElementById('f-theme');
+  const filtered = domainId ? allThemes.filter(t => t.domainId === domainId) : allThemes;
+  fTheme.innerHTML = '<option value="">— Thème —</option>' +
+    filtered.map(t => `<option value="${t.id}">${escHtml(t.name)}</option>`).join('');
+}
+
+// ─── FORMULAIRE SUJET (ouvrir/fermer/remplir) ──────────────────
+
+function openAddSubject() {
+  editingId = null;
+  quizItems = [];
+  document.getElementById('subject-form').reset();
+  document.getElementById('f-image-url').value = '';
+  document.getElementById('image-preview').style.display = 'none';
+  document.getElementById('form-title').textContent = "Nouvelle fiche";
+  filterThemesByDomain();
+  renderQuiz();
+  showPanel('panel-form');
+}
+
+async function openEditSubject(id) {
+  // Charge le sujet depuis Firestore pour pré-remplir le formulaire
+  const subjects = await loadSubjects();
+  const s = subjects.find(x => x.id === id);
+  if (!s) return;
+  editingId = id;
+  quizItems = s.quiz || [];
+
+  document.getElementById('form-title').textContent = "Modifier la fiche";
+  document.getElementById('f-title').value       = s.title || '';
+  document.getElementById('f-concept').value     = s.concept || '';
+  document.getElementById('f-explanation').value = s.explanation || '';
+  document.getElementById('f-daily').value       = s.dailyLife || '';
+  document.getElementById('f-example').value     = s.example || '';
+  document.getElementById('f-pop').value         = s.popCulture || '';
+  document.getElementById('f-keywords').value    = (s.keywords || []).join(', ');
+  document.getElementById('f-domain').value      = s.domainId || '';
+  filterThemesByDomain();
+  setTimeout(() => { document.getElementById('f-theme').value = s.themeId || ''; }, 50);
+  document.getElementById('f-level').value       = s.level || 'beginner';
+  document.getElementById('f-status').value      = s.status || 'draft';
+  document.getElementById('f-premium').value     = s.isPremium ? 'premium' : 'free';
+  document.getElementById('f-image-url').value   = s.imageUrl || '';
+
+  if (s.imageUrl) {
+    const prev = document.getElementById('image-preview');
+    prev.src = s.imageUrl;
+    prev.style.display = 'block';
+  }
+
+  renderQuiz();
+  showPanel('panel-form');
+}
+
+function closeSubjectForm() {
+  showPanel('panel-subjects');
+}
+
+async function confirmDelete(id) {
+  if (!confirm("Supprimer cette fiche ? Irréversible.")) return;
+  await deleteDoc(doc(db, "subjects", id));
+  await refreshSubjects();
+  showToast("Fiche supprimée", "success");
+}
+
+// ─── NAVIGATION ENTRE PANNEAUX ─────────────────────────────────
+// L'app a 3 "panneaux" : liste sujets, formulaire, arbre domaines
+function showPanel(id) {
+  document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+  document.getElementById(id).classList.add('active');
+  document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
+  const map = { 'panel-subjects': 'nav-subjects', 'panel-form': 'nav-subjects', 'panel-domains': 'nav-domains' };
+  document.getElementById(map[id])?.classList.add('active');
+}
+
+// ─── UTILITAIRES ───────────────────────────────────────────────
+const v = id => document.getElementById(id)?.value || '';
+
+function escHtml(str) {
+  if (!str) return '';
+  return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+function statusPill(s) {
+  return { published: '<span class="pill pill-green">Publié</span>', draft: '<span class="pill pill-orange">Brouillon</span>', archived: '<span class="pill pill-gray">Archivé</span>' }[s]
+    || `<span class="pill pill-gray">${escHtml(s)}</span>`;
+}
+
+function showToast(msg, type='success') {
+  const t = document.getElementById('toast');
+  const colors = { success: 'var(--green)', error: 'var(--red)', info: 'var(--accent)' };
+  t.style.borderColor = colors[type] || colors.success;
+  t.querySelector('.toast-icon').textContent = type === 'error' ? '✕' : '✓';
+  t.querySelector('#toast-msg').textContent  = msg;
+  t.classList.add('show');
+  setTimeout(() => t.classList.remove('show'), 3200);
+}
+
+// ─── EXPOSITION DES FONCTIONS AU HTML ──────────────────────────
+// Les fonctions utilisées dans les onclick="" du HTML
+// doivent être sur window pour être accessibles
+Object.assign(window, {
+  openAddSubject, openEditSubject, closeSubjectForm, confirmDelete,
+  saveSubject, saveDomain, saveTheme,
+  openEditDomain, confirmDeleteDomain,
+  openEditTheme, confirmDeleteTheme,
+  addQuizQuestion, removeQuizQuestion,
+  filterThemesByDomain,
+  showPanel,
+  showToast
+});
+
+// ─── DÉMARRAGE ─────────────────────────────────────────────────
+window.addEventListener('DOMContentLoaded', async () => {
+  showToast("Connexion à Firebase...", "info");
+  await refreshAll();
+  await refreshSubjects();
+  showToast("Knowie connecté ✓", "success");
+
+  // Upload image : quand l'utilisateur choisit un fichier
+  document.getElementById('f-image-file').addEventListener('change', async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    const progress = document.getElementById('upload-progress');
+    try {
+      const url = await uploadImage(file, progress);
+      document.getElementById('f-image-url').value = url;
+      // Affiche un aperçu immédiatement
+      const prev = document.getElementById('image-preview');
+      prev.src   = url;
+      prev.style.display = 'block';
+    } catch(err) {
+      showToast("Erreur upload — vérifie Firebase Storage", "error");
+      console.error(err);
+    }
+  });
+
+  // Met à jour la liste de thèmes quand on change le domaine
+  document.getElementById('f-domain').addEventListener('change', filterThemesByDomain);
+
+  // Recherche dans la liste de sujets
+  document.getElementById('search-input').addEventListener('input', (e) => {
+    const q = e.target.value.toLowerCase();
+    document.querySelectorAll('#subjects-tbody tr').forEach(r => {
+      r.style.display = r.textContent.toLowerCase().includes(q) ? '' : 'none';
+    });
+  });
+});
+</script>
+
+<style>
+:root {
+  --bg:#0f0e0d; --surface:#1a1917; --surface2:#242220; --surface3:#2e2b27;
+  --border:#2e2c29; --accent:#e8c87a; --text:#f0ede8;
+  --text-muted:#7a7570; --text-soft:#b0ab9e;
+  --green:#4a9b6f; --red:#c45c3a; --purple:#7c6aad;
+  --radius:10px;
+  --font-display:'Playfair Display',Georgia,serif;
+  --font-body:'DM Sans',sans-serif;
+}
+*{box-sizing:border-box;margin:0;padding:0;}
+body{background:var(--bg);color:var(--text);font-family:var(--font-body);font-size:14px;min-height:100vh;display:flex;}
+
+/* ── Sidebar ── */
+.sidebar{width:220px;min-height:100vh;background:var(--surface);border-right:1px solid var(--border);display:flex;flex-direction:column;padding:28px 0;position:fixed;top:0;left:0;bottom:0;}
+.logo{padding:0 24px 20px;border-bottom:1px solid var(--border);margin-bottom:14px;}
+.logo-name{font-family:var(--font-display);font-size:22px;color:var(--accent);}
+.logo-sub{font-size:11px;color:var(--text-muted);letter-spacing:1.5px;text-transform:uppercase;margin-top:2px;}
+.firebase-badge{margin:0 14px 14px;padding:6px 10px;background:rgba(74,155,111,0.1);border:1px solid rgba(74,155,111,0.25);border-radius:6px;font-size:11px;color:#6fcf97;display:flex;align-items:center;gap:6px;}
+.dot-live{width:6px;height:6px;background:var(--green);border-radius:50%;animation:pulse 2s infinite;flex-shrink:0;}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:0.3}}
+.nav-section{padding:6px 12px;}
+.nav-label{font-size:10px;letter-spacing:1.5px;text-transform:uppercase;color:var(--text-muted);padding:0 12px;margin:10px 0 4px;}
+.nav-item{display:flex;align-items:center;gap:10px;padding:9px 12px;border-radius:8px;cursor:pointer;color:var(--text-soft);transition:all .15s;border:none;background:none;width:100%;text-align:left;font-family:var(--font-body);font-size:13.5px;}
+.nav-item:hover{background:var(--surface2);color:var(--text);}
+.nav-item.active{background:rgba(232,200,122,0.12);color:var(--accent);}
+.nav-icon{font-size:15px;width:20px;text-align:center;}
+
+/* ── Panneaux ── */
+.main{margin-left:220px;flex:1;display:flex;flex-direction:column;}
+.panel{display:none;flex:1;}
+.panel.active{display:flex;flex-direction:column;}
+
+/* ── Panel : liste sujets ── */
+.panel-header{display:flex;align-items:center;justify-content:space-between;padding:28px 36px 20px;border-bottom:1px solid var(--border);}
+.page-title{font-family:var(--font-display);font-size:26px;font-weight:400;}
+.page-sub{color:var(--text-muted);font-size:13px;margin-top:3px;}
+
+.table-wrap{flex:1;overflow:auto;}
+.table-top{display:flex;align-items:center;justify-content:space-between;padding:14px 36px;border-bottom:1px solid var(--border);}
+.table-title{font-weight:500;font-size:13.5px;}
+.search-input{background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:7px 12px;color:var(--text);font-family:var(--font-body);font-size:13px;width:220px;outline:none;transition:border-color .15s;}
+.search-input:focus{border-color:var(--accent);}
+.search-input::placeholder{color:var(--text-muted);}
+table{width:100%;border-collapse:collapse;}
+thead th{text-align:left;padding:11px 20px;font-size:11px;letter-spacing:1px;text-transform:uppercase;color:var(--text-muted);border-bottom:1px solid var(--border);font-weight:400;background:var(--surface);}
+tbody tr{border-bottom:1px solid var(--border);transition:background .1s;}
+tbody tr:last-child{border-bottom:none;}
+tbody tr:hover{background:var(--surface2);}
+td{padding:12px 20px;color:var(--text-soft);font-size:13.5px;vertical-align:middle;}
+.primary{color:var(--text);font-weight:500;}
+
+.pill{display:inline-flex;align-items:center;gap:4px;padding:3px 9px;border-radius:20px;font-size:11.5px;font-weight:500;}
+.pill::before{content:'●';font-size:7px;}
+.pill-green{background:rgba(74,155,111,0.15);color:#6fcf97;}
+.pill-orange{background:rgba(232,200,122,0.12);color:var(--accent);}
+.pill-gray{background:var(--surface2);color:var(--text-muted);}
+.domain-pill{display:inline-block;padding:3px 9px;border-radius:20px;font-size:11.5px;font-weight:500;background:rgba(124,106,173,0.15);color:#a991e8;}
+.theme-pill{display:inline-block;padding:3px 9px;border-radius:20px;font-size:11.5px;font-weight:500;background:var(--surface2);color:var(--text-soft);}
+
+.row-actions{display:flex;gap:5px;}
+.icon-btn{background:var(--surface2);border:1px solid var(--border);border-radius:6px;color:var(--text-muted);width:28px;height:28px;cursor:pointer;font-size:13px;display:flex;align-items:center;justify-content:center;transition:all .15s;}
+.icon-btn:hover{color:var(--text);border-color:#444;}
+.icon-btn.del-btn:hover{color:var(--red);border-color:var(--red);background:rgba(196,92,58,.1);}
+
+/* ── Panel : formulaire ── */
+#panel-form{overflow-y:auto;}
+.form-header{display:flex;align-items:center;gap:16px;padding:24px 36px;border-bottom:1px solid var(--border);position:sticky;top:0;background:var(--bg);z-index:10;}
+.form-header-title{font-family:var(--font-display);font-size:22px;flex:1;}
+.form-body{padding:28px 36px;max-width:800px;}
+.section-title{font-size:11px;letter-spacing:1.5px;text-transform:uppercase;color:var(--accent);margin:28px 0 14px;padding-bottom:8px;border-bottom:1px solid var(--border);}
+.section-title:first-child{margin-top:0;}
+.form-group{margin-bottom:16px;}
+.form-label{display:block;font-size:12px;letter-spacing:.7px;text-transform:uppercase;color:var(--text-muted);margin-bottom:6px;}
+.form-label .hint{font-size:11px;color:var(--text-muted);text-transform:none;letter-spacing:0;margin-left:6px;opacity:0.7;}
+.form-input,.form-select,.form-textarea{width:100%;background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:10px 13px;color:var(--text);font-family:var(--font-body);font-size:13.5px;outline:none;transition:border-color .15s;}
+.form-input:focus,.form-select:focus,.form-textarea:focus{border-color:var(--accent);}
+.form-select{appearance:none;cursor:pointer;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%237a7570'/%3E%3C/svg%3E");background-repeat:no-repeat;background-position:right 12px center;}
+.form-textarea{resize:vertical;min-height:110px;line-height:1.65;}
+.form-textarea.tall{min-height:160px;}
+.form-row{display:grid;grid-template-columns:1fr 1fr;gap:14px;}
+.form-row-3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:14px;}
+
+/* ── Image upload ── */
+.image-upload-zone{border:1.5px dashed var(--border);border-radius:10px;padding:20px;text-align:center;cursor:pointer;transition:border-color .15s;position:relative;}
+.image-upload-zone:hover{border-color:var(--accent);}
+.image-upload-zone input[type=file]{position:absolute;inset:0;opacity:0;cursor:pointer;width:100%;height:100%;}
+.upload-label{font-size:13px;color:var(--text-muted);}
+.upload-label strong{color:var(--accent);}
+#image-preview{width:100%;max-height:160px;object-fit:cover;border-radius:8px;margin-top:12px;display:none;}
+#upload-progress{font-size:12px;color:var(--green);margin-top:8px;display:none;}
+.image-url-row{display:flex;gap:8px;margin-top:10px;}
+.image-url-row .form-input{flex:1;}
+
+/* ── Quiz builder ── */
+.quiz-card{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:16px;margin-bottom:12px;}
+.quiz-card-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;}
+.quiz-num{font-size:11px;letter-spacing:1px;text-transform:uppercase;color:var(--accent);font-weight:500;}
+.quiz-options{display:flex;flex-direction:column;gap:8px;margin-top:10px;}
+.quiz-option{display:flex;align-items:center;gap:8px;}
+.quiz-option input[type=radio]{accent-color:var(--accent);width:16px;height:16px;flex-shrink:0;cursor:pointer;}
+.quiz-hint{font-size:11px;color:var(--text-muted);margin-top:8px;}
+.empty-quiz{padding:20px;text-align:center;color:var(--text-muted);font-size:13px;border:1.5px dashed var(--border);border-radius:10px;}
+
+/* ── Panel : domaines ── */
+.domains-body{padding:28px 36px;display:grid;grid-template-columns:1fr 1fr;gap:24px;overflow-y:auto;}
+.create-card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:24px;}
+.create-card-title{font-weight:500;font-size:14px;margin-bottom:16px;color:var(--text);}
+.domain-tree-wrap{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:24px;}
+.domain-tree-title{font-weight:500;font-size:14px;margin-bottom:16px;}
+.domain-block{margin-bottom:16px;padding-bottom:16px;border-bottom:1px solid var(--border);}
+.domain-block:last-child{margin-bottom:0;padding-bottom:0;border-bottom:none;}
+.domain-header{display:flex;align-items:center;gap:10px;margin-bottom:8px;}
+.domain-emoji{font-size:20px;}
+.domain-name{font-weight:500;color:var(--text);}
+.theme-badge{margin-left:auto;font-size:11px;color:var(--text-muted);}
+.themes-list{display:flex;flex-wrap:wrap;gap:6px;padding-left:30px;}
+.theme-tag{display:inline-flex;align-items:center;gap:5px;padding:3px 8px;border-radius:20px;font-size:12px;background:var(--surface2);color:var(--text-soft);border:1px solid var(--border);}
+.tag-edit-btn,.tag-del-btn{background:none;border:none;cursor:pointer;font-size:11px;color:var(--text-muted);padding:0 2px;line-height:1;transition:color .15s;}
+.tag-edit-btn:hover{color:var(--accent);}
+.tag-del-btn:hover{color:var(--red);}
+.no-themes{font-size:12px;color:var(--text-muted);}
+.empty-tree{padding:20px;text-align:center;color:var(--text-muted);font-size:13px;}
+
+/* ── Boutons ── */
+.btn{display:inline-flex;align-items:center;gap:7px;padding:9px 18px;border-radius:var(--radius);font-family:var(--font-body);font-size:13.5px;font-weight:500;cursor:pointer;transition:all .15s;border:none;}
+.btn-primary{background:var(--accent);color:#1a1710;}
+.btn-primary:hover{background:#f0d48a;}
+.btn-primary:disabled{opacity:.6;cursor:not-allowed;}
+.btn-secondary{background:var(--surface2);color:var(--text-soft);border:1px solid var(--border);}
+.btn-secondary:hover{color:var(--text);}
+.btn-sm{padding:6px 12px;font-size:12.5px;}
+.btn-ghost{background:none;border:1px solid var(--border);color:var(--text-muted);}
+.btn-ghost:hover{color:var(--text);border-color:#555;}
+
+/* ── Toast ── */
+.toast{position:fixed;bottom:24px;right:24px;background:var(--surface);border:1px solid var(--green);border-radius:10px;padding:13px 18px;font-size:13.5px;color:var(--text);transform:translateY(70px);opacity:0;transition:all .3s;z-index:200;display:flex;align-items:center;gap:10px;box-shadow:0 4px 20px rgba(0,0,0,.4);}
+.toast.show{transform:translateY(0);opacity:1;}
+</style>
+</head>
+<body>
+
+<!-- ══ SIDEBAR ══════════════════════════════════ -->
+<nav class="sidebar">
+  <div class="logo">
+    <div class="logo-name">Knowie</div>
+    <div class="logo-sub">Admin</div>
+  </div>
+  <div class="firebase-badge">
+    <span class="dot-live"></span> Firebase live
+  </div>
+
+  <div class="nav-section">
+    <div class="nav-label">Contenu</div>
+    <button class="nav-item active" id="nav-subjects" onclick="showPanel('panel-subjects')">
+      <span class="nav-icon">✦</span> Fiches
+    </button>
+    <button class="nav-item" id="nav-domains" onclick="showPanel('panel-domains')">
+      <span class="nav-icon">◎</span> Domaines & Thèmes
+    </button>
+  </div>
+
+  <div style="margin-top:auto;padding:14px 24px;border-top:1px solid var(--border);color:var(--text-muted);font-size:11px;line-height:1.6;">
+    Projet<br>
+    <span style="color:var(--accent);font-weight:500;">knowie-77fde</span>
+  </div>
+</nav>
+
+<!-- ══ MAIN ════════════════════════════════════ -->
+<main class="main">
+
+  <!-- ── PANNEAU 1 : liste des fiches ── -->
+  <div class="panel active" id="panel-subjects">
+    <div class="panel-header">
+      <div>
+        <div class="page-title">Fiches</div>
+        <div class="page-sub">Tout le contenu de Knowie</div>
+      </div>
+      <button class="btn btn-primary" onclick="openAddSubject()">+ Nouvelle fiche</button>
+    </div>
+    <div class="table-top">
+      <div class="table-title" id="subjects-count">Chargement...</div>
+      <input class="search-input" id="search-input" placeholder="🔍  Rechercher une fiche...">
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr><th>Titre</th><th>Domaine</th><th>Thème</th><th>Statut</th><th>Accès</th><th>Actions</th></tr>
+        </thead>
+        <tbody id="subjects-tbody">
+          <tr><td colspan="6" style="text-align:center;padding:30px;color:var(--text-muted)">Connexion...</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- ── PANNEAU 2 : formulaire de fiche ── -->
+  <div class="panel" id="panel-form">
+    <div class="form-header">
+      <button class="btn btn-ghost btn-sm" onclick="closeSubjectForm()">← Retour</button>
+      <div class="form-header-title" id="form-title">Nouvelle fiche</div>
+      <button class="btn btn-primary" id="save-subject-btn" onclick="saveSubject()">Enregistrer la fiche</button>
+    </div>
+
+    <div class="form-body">
+      <form id="subject-form" onsubmit="return false">
+
+        <!-- CLASSIFICATION -->
+        <div class="section-title">Classification</div>
+        <div class="form-row">
+          <div class="form-group">
+            <label class="form-label">Domaine *</label>
+            <select class="form-select" id="f-domain">
+              <option value="">— Domaine —</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label class="form-label">Thème * <span class="hint">(se filtre selon le domaine)</span></label>
+            <select class="form-select" id="f-theme">
+              <option value="">— Choisis d'abord un domaine —</option>
+            </select>
+          </div>
+        </div>
+        <div class="form-row-3">
+          <div class="form-group">
+            <label class="form-label">Niveau</label>
+            <select class="form-select" id="f-level">
+              <option value="beginner">Débutant</option>
+              <option value="intermediate">Intermédiaire</option>
+              <option value="advanced">Avancé</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label class="form-label">Statut</label>
+            <select class="form-select" id="f-status">
+              <option value="draft">Brouillon</option>
+              <option value="published">Publié</option>
+              <option value="archived">Archivé</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label class="form-label">Accès</label>
+            <select class="form-select" id="f-premium">
+              <option value="free">Gratuit</option>
+              <option value="premium">★ Premium</option>
+            </select>
+          </div>
+        </div>
+
+        <!-- CONTENU -->
+        <div class="section-title">Contenu de la fiche</div>
+
+        <div class="form-group">
+          <label class="form-label">Titre de la fiche *</label>
+          <input class="form-input" id="f-title" placeholder="ex : Les neurotransmetteurs : la chimie de ton humeur">
+        </div>
+
+        <div class="form-group">
+          <label class="form-label">Concept clé <span class="hint">— mots-clés du sujet</span></label>
+          <input class="form-input" id="f-concept" placeholder="ex : dopamine, sérotonine, GABA, noradrénaline, acétylcholine">
+        </div>
+
+        <div class="form-group">
+          <label class="form-label">Explication détaillée</label>
+          <textarea class="form-textarea tall" id="f-explanation"
+            placeholder="Explique le sujet en profondeur. Tu peux utiliser des tirets pour les listes.
+ex :
+* Dopamine → motivation, anticipation de la récompense
+* Sérotonine → humeur, sérénité, bien-être"></textarea>
+        </div>
+
+        <div class="form-group">
+          <label class="form-label">Intérêt dans la vie quotidienne</label>
+          <textarea class="form-textarea" id="f-daily"
+            placeholder="Pourquoi c'est utile de savoir ça au quotidien ?"></textarea>
+        </div>
+
+        <div class="form-group">
+          <label class="form-label">Exemple concret</label>
+          <textarea class="form-textarea" id="f-example"
+            placeholder="Un exemple précis, ancré dans le réel..."></textarea>
+        </div>
+
+        <div class="form-group">
+          <label class="form-label">Référence pop culture <span class="hint">— film, série, livre…</span></label>
+          <textarea class="form-textarea" id="f-pop" style="min-height:70px"
+            placeholder="ex : 🎬 Black Mirror, épisode Nosedive — dopamine sociale, quête de validation..."></textarea>
+        </div>
+
+        <div class="form-group">
+          <label class="form-label">Mots-clés <span class="hint">— séparés par des virgules</span></label>
+          <input class="form-input" id="f-keywords" placeholder="Dopamine, Sérotonine, Motivation, Récompense, Stress">
+        </div>
+
+        <!-- IMAGE -->
+        <div class="section-title">Image d'illustration</div>
+        <div class="form-group">
+          <div class="image-upload-zone">
+            <input type="file" id="f-image-file" accept="image/*">
+            <div class="upload-label">
+              <strong>Clique ici</strong> ou glisse une image<br>
+              <span style="font-size:11px">JPG, PNG, WebP — max 5 Mo</span>
+            </div>
+          </div>
+          <div id="upload-progress"></div>
+          <img id="image-preview" alt="Aperçu">
+          <!-- Champ caché qui stocke l'URL Firebase de l'image -->
+          <div class="image-url-row">
+            <input class="form-input" id="f-image-url" placeholder="ou colle directement une URL d'image ici" style="font-size:12px;color:var(--text-muted)">
+          </div>
+        </div>
+
+        <!-- QUIZ -->
+        <div class="section-title">Mini-quiz</div>
+        <div id="quiz-container">
+          <div class="empty-quiz">Aucune question — clique sur "Ajouter une question"</div>
+        </div>
+        <button type="button" class="btn btn-secondary btn-sm" style="margin-top:12px" onclick="addQuizQuestion()">
+          + Ajouter une question
+        </button>
+
+      </form>
+    </div>
+  </div>
+
+  <!-- ── PANNEAU 3 : domaines & thèmes ── -->
+  <div class="panel" id="panel-domains">
+    <div class="panel-header">
+      <div>
+        <div class="page-title">Domaines & Thèmes</div>
+        <div class="page-sub">Hiérarchie : Domaine → Thème → Fiche</div>
+      </div>
+    </div>
+
+    <div class="domains-body">
+
+      <!-- Créer un domaine -->
+      <div class="create-card">
+        <div class="create-card-title">Nouveau domaine</div>
+        <div class="form-group">
+          <label class="form-label">Nom</label>
+          <input class="form-input" id="d-name" placeholder="ex : Psychologie">
+        </div>
+        <button class="btn btn-primary btn-sm" onclick="saveDomain()">Créer le domaine</button>
+      </div>
+
+      <!-- Créer un thème -->
+      <div class="create-card">
+        <div class="create-card-title">Nouveau thème</div>
+        <div class="form-group">
+          <label class="form-label">À quel domaine appartient ce thème ?</label>
+          <select class="form-select" id="t-domain">
+            <option value="">— Choisir un domaine —</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Nom du thème</label>
+          <input class="form-input" id="t-name" placeholder="ex : Neurosciences">
+        </div>
+        <button class="btn btn-primary btn-sm" onclick="saveTheme()">Créer le thème</button>
+      </div>
+
+      <!-- Arbre domaines/thèmes — s'étend sur toute la largeur -->
+      <div class="domain-tree-wrap" style="grid-column:1/-1;">
+        <div class="domain-tree-title">Structure actuelle</div>
+        <div id="domain-tree">
+          <div class="empty-tree">Chargement...</div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+</main>
+
+<div class="toast" id="toast">
+  <span class="toast-icon">✓</span>
+  <span id="toast-msg">OK</span>
+</div>
+
+</body>
+</html>
