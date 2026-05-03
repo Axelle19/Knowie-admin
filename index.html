@@ -363,7 +363,7 @@ function filterThemesByDomain() {
 
 function openAddSubject() {
   editingId = null;
-  quizItems = [];
+  quizItems.length = 0; // vide le tableau sans le réassigner
   document.getElementById('subject-form').reset();
   document.getElementById('f-image-url').value = '';
   document.getElementById('image-preview').style.display = 'none';
@@ -379,7 +379,8 @@ async function openEditSubject(id) {
   const s = subjects.find(x => x.id === id);
   if (!s) return;
   editingId = id;
-  quizItems = s.quiz || [];
+  quizItems.length = 0;
+  (s.quiz || []).forEach(q => quizItems.push(q)); // remplit sans réassigner
 
   document.getElementById('form-title').textContent = "Modifier la fiche";
   document.getElementById('f-title').value       = s.title || '';
@@ -461,8 +462,8 @@ Object.assign(window, {
   openEditTheme, confirmDeleteTheme,
   addQuizQuestion, removeQuizQuestion, setCorrect,
   filterThemesByDomain,
-  showPanel,
-  showToast
+  showPanel, showToast,
+  quizItems  // exposé pour que les onclick inline puissent y accéder
 });
 
 // ─── DÉMARRAGE ─────────────────────────────────────────────────
