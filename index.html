@@ -139,23 +139,23 @@ async function saveSubject() {
 }
 
 // ─── QUIZ BUILDER ──────────────────────────────────────────────
-// Chaque question est un objet : { question, options: [{text, correct}] }
 
-// Lit tous les champs du DOM et les sauvegarde dans quizItems
-// AVANT de reconstruire l'affichage — sinon les valeurs tapées sont perdues
+// Lit tous les champs actuellement affichés et les sauvegarde dans quizItems
 function syncQuizFromDOM() {
   quizItems.forEach((q, i) => {
-    const qInput = document.querySelector(`#quiz-q-${i}`);
+    const qInput = document.getElementById(`quiz-q-${i}`);
     if (qInput) q.question = qInput.value;
     q.options.forEach((opt, j) => {
-      const oInput = document.querySelector(`#quiz-o-${i}-${j}`);
+      const oInput = document.getElementById(`quiz-o-${i}-${j}`);
       if (oInput) opt.text = oInput.value;
+      const radio = document.querySelector(`input[name="correct-${i}"][data-j="${j}"]`);
+      if (radio) opt.correct = radio.checked;
     });
   });
 }
 
 function addQuizQuestion() {
-  syncQuizFromDOM(); // sauvegarde ce qui est déjà tapé
+  syncQuizFromDOM();
   quizItems.push({ question: "", options: [
     { text: "", correct: false },
     { text: "", correct: false },
@@ -165,9 +165,13 @@ function addQuizQuestion() {
 }
 
 function removeQuizQuestion(i) {
-  syncQuizFromDOM(); // sauvegarde avant de supprimer
+  syncQuizFromDOM();
   quizItems.splice(i, 1);
   renderQuiz();
+}
+
+function setCorrect(i, j) {
+  quizItems[i].options.forEach((o, k) => o.correct = (k === j));
 }
 
 function renderQuiz() {
@@ -182,15 +186,13 @@ function renderQuiz() {
         <span class="quiz-num">Q${i+1}</span>
         <button class="icon-btn del-btn" onclick="removeQuizQuestion(${i})">✕</button>
       </div>
-      <input class="form-input" id="quiz-q-${i}" placeholder="La question..." value="${escHtml(q.question)}"
-        oninput="quizItems[${i}].question = this.value">
+      <input class="form-input" id="quiz-q-${i}" placeholder="La question..." value="${escHtml(q.question)}">
       <div class="quiz-options">
         ${q.options.map((opt, j) => `
           <div class="quiz-option">
-            <input type="radio" name="correct-${i}" ${opt.correct ? 'checked' : ''}
-              onchange="quizItems[${i}].options.forEach((o,k)=>o.correct=k===${j})">
-            <input class="form-input" id="quiz-o-${i}-${j}" placeholder="Réponse ${j+1}" value="${escHtml(opt.text)}"
-              oninput="quizItems[${i}].options[${j}].text = this.value">
+            <input type="radio" name="correct-${i}" data-j="${j}" ${opt.correct ? 'checked' : ''}
+              onchange="setCorrect(${i},${j})">
+            <input class="form-input" id="quiz-o-${i}-${j}" placeholder="Réponse ${j+1}" value="${escHtml(opt.text)}">
           </div>
         `).join('')}
       </div>
@@ -457,7 +459,7 @@ Object.assign(window, {
   saveSubject, saveDomain, saveTheme,
   openEditDomain, confirmDeleteDomain,
   openEditTheme, confirmDeleteTheme,
-  addQuizQuestion, removeQuizQuestion,
+  addQuizQuestion, removeQuizQuestion, setCorrect,
   filterThemesByDomain,
   showPanel,
   showToast
