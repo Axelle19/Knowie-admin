@@ -600,8 +600,8 @@ td{padding:12px 20px;color:var(--text-soft);font-size:13.5px;vertical-align:midd
 .domain-name{font-weight:500;color:var(--text);}
 .theme-badge{margin-left:auto;font-size:11px;color:var(--text-muted);}
 .themes-list{display:flex;flex-wrap:wrap;gap:6px;padding-left:30px;}
-.theme-tag{display:inline-flex;align-items:center;gap:5px;padding:3px 8px;border-radius:20px;font-size:12px;background:var(--surface2);color:var(--text-soft);border:1px solid var(--border);}
-.tag-edit-btn,.tag-del-btn{background:none;border:none;cursor:pointer;font-size:11px;color:var(--text-muted);padding:0 2px;line-height:1;transition:color .15s;}
+.theme-tag{display:inline-flex;align-items:center;gap:5px;padding:3px 8px;border-radius:20px;font-size:12px;background:var(--surface2);color:var(--text-soft);border:1px solid var(--border);cursor:default;}
+.tag-edit-btn,.tag-del-btn{background:none;border:none;cursor:pointer;font-size:11px;color:var(--text-muted);padding:0 2px;line-height:1;transition:color .15s;pointer-events:all;}
 .tag-edit-btn:hover{color:var(--accent);}
 .tag-del-btn:hover{color:var(--red);}
 .no-themes{font-size:12px;color:var(--text-muted);}
