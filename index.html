@@ -92,24 +92,20 @@ async function saveSubject() {
 
   // Lecture de tous les champs du formulaire
   const data = {
-    title        : v('f-title'),
-    concept      : v('f-concept'),
-    explanation  : v('f-explanation'),
-    dailyLife    : v('f-daily'),
-    example      : v('f-example'),
-    popCulture   : v('f-pop'),
-    keywords     : v('f-keywords').split(/[,\n]/).map(s => s.trim()).filter(Boolean),
-    // .split = découpe la chaîne en tableau
-    // .map + .trim = enlève les espaces en trop
-    // .filter(Boolean) = supprime les éléments vides
-    domainId     : v('f-domain'),
-    themeId      : v('f-theme'),
-    level        : v('f-level'),
-    status       : v('f-status'),
-    isPremium    : v('f-premium') === 'premium',
-    imageUrl     : v('f-image-url'),
-    quiz         : quizItems,
-    updatedAt    : serverTimestamp()
+    title      : v('f-title'),
+    importance : v('f-importance'),
+    explanation: v('f-explanation'),
+    surprise   : v('f-surprise'),
+    reference  : v('f-reference'),
+    takeaway   : v('f-takeaway'),
+    domainId   : v('f-domain'),
+    themeId    : v('f-theme'),
+    level      : v('f-level'),
+    status     : v('f-status'),
+    isPremium  : v('f-premium') === 'premium',
+    imageUrl   : v('f-image-url'),
+    quiz       : quizItems,
+    updatedAt  : serverTimestamp()
   };
 
   if (!data.title || !data.domainId || !data.themeId) {
@@ -382,21 +378,20 @@ async function openEditSubject(id) {
   quizItems.length = 0;
   (s.quiz || []).forEach(q => quizItems.push(q)); // remplit sans réassigner
 
-  document.getElementById('form-title').textContent = "Modifier la fiche";
-  document.getElementById('f-title').value       = s.title || '';
-  document.getElementById('f-concept').value     = s.concept || '';
+  document.getElementById('form-title').textContent  = "Modifier la fiche";
+  document.getElementById('f-title').value       = s.title       || '';
+  document.getElementById('f-importance').value  = s.importance  || '';
   document.getElementById('f-explanation').value = s.explanation || '';
-  document.getElementById('f-daily').value       = s.dailyLife || '';
-  document.getElementById('f-example').value     = s.example || '';
-  document.getElementById('f-pop').value         = s.popCulture || '';
-  document.getElementById('f-keywords').value    = (s.keywords || []).join(', ');
-  document.getElementById('f-domain').value      = s.domainId || '';
+  document.getElementById('f-surprise').value    = s.surprise    || '';
+  document.getElementById('f-reference').value   = s.reference   || '';
+  document.getElementById('f-takeaway').value    = s.takeaway    || '';
+  document.getElementById('f-domain').value      = s.domainId    || '';
   filterThemesByDomain();
   setTimeout(() => { document.getElementById('f-theme').value = s.themeId || ''; }, 50);
-  document.getElementById('f-level').value       = s.level || 'beginner';
-  document.getElementById('f-status').value      = s.status || 'draft';
-  document.getElementById('f-premium').value     = s.isPremium ? 'premium' : 'free';
-  document.getElementById('f-image-url').value   = s.imageUrl || '';
+  document.getElementById('f-level').value       = s.level       || 'beginner';
+  document.getElementById('f-status').value      = s.status      || 'draft';
+  document.getElementById('f-premium').value     = s.isPremium   ? 'premium' : 'free';
+  document.getElementById('f-image-url').value   = s.imageUrl    || '';
 
   if (s.imageUrl) {
     const prev = document.getElementById('image-preview');
@@ -768,48 +763,47 @@ td{padding:12px 20px;color:var(--text-soft);font-size:13.5px;vertical-align:midd
         </div>
 
         <!-- CONTENU -->
-        <div class="section-title">Contenu de la fiche</div>
-
+        <div class="section-title">① Titre</div>
         <div class="form-group">
           <label class="form-label">Titre de la fiche *</label>
-          <input class="form-input" id="f-title" placeholder="ex : Les neurotransmetteurs : la chimie de ton humeur">
+          <input class="form-input" id="f-title" placeholder="ex : Le biais d'ancrage — pourquoi le premier chiffre n'est jamais innocent">
         </div>
 
+        <div class="section-title">② Pourquoi c'est important</div>
         <div class="form-group">
-          <label class="form-label">Concept clé <span class="hint">— mots-clés du sujet</span></label>
-          <input class="form-input" id="f-concept" placeholder="ex : dopamine, sérotonine, GABA, noradrénaline, acétylcholine">
+          <label class="form-label">L'impact <span class="hint">— 2-3 phrases : à quoi ça sert de savoir ça, qu'est-ce que ça change</span></label>
+          <textarea class="form-textarea" id="f-importance"
+            placeholder="Pourquoi ce sujet mérite 5 minutes d'attention ? Quel impact concret dans la vie de quelqu'un ?"></textarea>
         </div>
 
+        <div class="section-title">③ Explication détaillée</div>
         <div class="form-group">
-          <label class="form-label">Explication détaillée</label>
+          <label class="form-label">Le fond du sujet <span class="hint">— recherches scientifiques si pertinent, exemple du quotidien tissé dedans</span></label>
           <textarea class="form-textarea tall" id="f-explanation"
-            placeholder="Explique le sujet en profondeur. Tu peux utiliser des tirets pour les listes.
-ex :
-* Dopamine → motivation, anticipation de la récompense
-* Sérotonine → humeur, sérénité, bien-être"></textarea>
+            placeholder="Explique le sujet en profondeur.
+Intègre l'exemple directement dans l'explication, au moment où ça devient abstrait.
+Si tu as des études ou recherches, cite-les ici."></textarea>
         </div>
 
+        <div class="section-title">④ Le détail qui surprend</div>
         <div class="form-group">
-          <label class="form-label">Intérêt dans la vie quotidienne</label>
-          <textarea class="form-textarea" id="f-daily"
-            placeholder="Pourquoi c'est utile de savoir ça au quotidien ?"></textarea>
+          <label class="form-label">1 fait inattendu <span class="hint">— contre-intuitif, peu connu, qui marque</span></label>
+          <textarea class="form-textarea" id="f-surprise"
+            placeholder="Le détail qu'on ne s'attend pas à apprendre, et qu'on va répéter à quelqu'un ce soir..."></textarea>
         </div>
 
+        <div class="section-title">⑤ Référence</div>
         <div class="form-group">
-          <label class="form-label">Exemple concret</label>
-          <textarea class="form-textarea" id="f-example"
-            placeholder="Un exemple précis, ancré dans le réel..."></textarea>
+          <label class="form-label">Film, série, livre, docu <span class="hint">— 1 seule, bien développée</span></label>
+          <textarea class="form-textarea" id="f-reference"
+            placeholder="ex : 🎬 Black Mirror, épisode Nosedive — montre comment la dopamine sociale crée une dépendance à la validation..."></textarea>
         </div>
 
+        <div class="section-title">⑥ À retenir</div>
         <div class="form-group">
-          <label class="form-label">Référence pop culture <span class="hint">— film, série, livre…</span></label>
-          <textarea class="form-textarea" id="f-pop" style="min-height:70px"
-            placeholder="ex : 🎬 Black Mirror, épisode Nosedive — dopamine sociale, quête de validation..."></textarea>
-        </div>
-
-        <div class="form-group">
-          <label class="form-label">Mots-clés <span class="hint">— séparés par des virgules</span></label>
-          <input class="form-input" id="f-keywords" placeholder="Dopamine, Sérotonine, Motivation, Récompense, Stress">
+          <label class="form-label">1 seule phrase <span class="hint">— mémorable, répétable, le test : est-ce que je peux l'expliquer en 20 secondes ?</span></label>
+          <input class="form-input" id="f-takeaway"
+            placeholder="ex : Ton cerveau ne mesure pas la probabilité d'un événement — il mesure à quelle vitesse il peut en trouver un exemple.">
         </div>
 
         <!-- IMAGE -->
@@ -824,14 +818,13 @@ ex :
           </div>
           <div id="upload-progress"></div>
           <img id="image-preview" alt="Aperçu">
-          <!-- Champ caché qui stocke l'URL Firebase de l'image -->
           <div class="image-url-row">
             <input class="form-input" id="f-image-url" placeholder="ou colle directement une URL d'image ici" style="font-size:12px;color:var(--text-muted)">
           </div>
         </div>
 
         <!-- QUIZ -->
-        <div class="section-title">Mini-quiz</div>
+        <div class="section-title">⑦ Quiz <span style="font-weight:300;font-size:11px;color:var(--text-muted);letter-spacing:0;text-transform:none">— 3 questions qui font réfléchir, pas mémoriser</span></div>
         <div id="quiz-container">
           <div class="empty-quiz">Aucune question — clique sur "Ajouter une question"</div>
         </div>
