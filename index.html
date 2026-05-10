@@ -5,520 +5,12 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Knowie — Admin</title>
 <link href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@400;600&family=DM+Sans:wght@300;400;500&display=swap" rel="stylesheet">
-
-<script type="module">
-import { initializeApp }       from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
-import { getFirestore, collection, addDoc, getDocs, updateDoc, deleteDoc, doc, serverTimestamp, query, orderBy }
-                               from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
-import { getStorage, ref, uploadBytes, getDownloadURL }
-                               from "https://www.gstatic.com/firebasejs/10.12.0/firebase-storage.js";
-
-const firebaseConfig = {
-  apiKey: "AIzaSyAd67RhjiBm6Da8Rp5cVhpkA_Tk47_6k6Y",
-  authDomain: "knowie-77fde.firebaseapp.com",
-  projectId: "knowie-77fde",
-  storageBucket: "knowie-77fde.firebasestorage.app",
-  messagingSenderId: "427764303215",
-  appId: "1:427764303215:web:0240a51884d17c6a49149a"
-};
-
-const app     = initializeApp(firebaseConfig);
-const db      = getFirestore(app);
-// Storage = l'endroit où Firebase stocke les fichiers (images, etc.)
-const storage = getStorage(app);
-
-// ─── ÉTAT GLOBAL ───────────────────────────────────────────────
-// Ces variables gardent en mémoire les données chargées
-// et l'id du sujet qu'on est en train de modifier
-let allDomains  = [];   // ex: { id, name, emoji }
-let allThemes   = [];   // ex: { id, name, domainId, emoji }
-let editingId   = null; // null = nouveau sujet, sinon = id Firestore
-let quizItems   = [];   // liste des questions du quiz
-
-// ─── CHARGEMENT DES DONNÉES ────────────────────────────────────
-
-async function loadDomains() {
-  const snap = await getDocs(collection(db, "domains"));
-  allDomains = [];
-  snap.forEach(d => allDomains.push({ id: d.id, ...d.data() }));
-  return allDomains;
-}
-
-async function loadThemes() {
-  const snap = await getDocs(collection(db, "themes"));
-  allThemes = [];
-  snap.forEach(d => allThemes.push({ id: d.id, ...d.data() }));
-  return allThemes;
-}
-
-async function loadSubjects() {
-  try {
-    const q = query(collection(db, "subjects"), orderBy("createdAt", "desc"));
-    const snap = await getDocs(q);
-    const subjects = [];
-    snap.forEach(d => subjects.push({ id: d.id, ...d.data() }));
-    return subjects;
-  } catch(e) { return []; }
-}
-
-// ─── UPLOAD IMAGE ──────────────────────────────────────────────
-// Quand tu sélectionnes une image, on l'envoie dans Firebase Storage
-// et on récupère son URL publique pour l'afficher dans l'app
-async function uploadImage(file, progressEl) {
-  // On crée un chemin unique pour l'image grâce à la date
-  // ex: "subjects/images/1715000000000_photo.jpg"
-  const path      = `subjects/images/${Date.now()}_${file.name}`;
-  const storageRef = ref(storage, path);
-
-  progressEl.textContent = "Envoi en cours...";
-  progressEl.style.display = "block";
-
-  // uploadBytes = envoie le fichier vers Firebase Storage
-  await uploadBytes(storageRef, file);
-
-  // getDownloadURL = récupère le lien public vers l'image
-  const url = await getDownloadURL(storageRef);
-  progressEl.textContent = "✓ Image uploadée";
-  setTimeout(() => { progressEl.style.display = "none"; }, 2000);
-  return url;
-}
-
-// ─── SAUVEGARDE SUJET ──────────────────────────────────────────
-async function saveSubject() {
-  const btn = document.getElementById('save-subject-btn');
-
-  // Sauvegarde les champs du quiz qui n'ont pas encore été synchronisés
-  syncQuizFromDOM();
-
-  // Lecture de tous les champs du formulaire
-  const data = {
-    title      : v('f-title'),
-    importance : v('f-importance'),
-    explanation: v('f-explanation'),
-    surprise   : v('f-surprise'),
-    reference  : v('f-reference'),
-    takeaway   : v('f-takeaway'),
-    domainId   : v('f-domain'),
-    themeId    : v('f-theme'),
-    level      : v('f-level'),
-    status     : v('f-status'),
-    isPremium  : v('f-premium') === 'premium',
-    imageUrl   : v('f-image-url'),
-    quiz       : quizItems,
-    updatedAt  : serverTimestamp()
-  };
-
-  if (!data.title || !data.domainId || !data.themeId) {
-    showToast("Titre, domaine et thème sont obligatoires", "error"); return;
-  }
-
-  btn.textContent = "Enregistrement...";
-  btn.disabled = true;
-
-  try {
-    if (editingId) {
-      await updateDoc(doc(db, "subjects", editingId), data);
-    } else {
-      await addDoc(collection(db, "subjects"), { ...data, createdAt: serverTimestamp() });
-    }
-    closeSubjectForm();
-    await refreshSubjects();
-    showToast(editingId ? "Sujet mis à jour ✓" : "Sujet créé dans Firebase ✓", "success");
-    editingId = null;
-  } catch(e) {
-    showToast("Erreur Firebase — ouvre F12 pour voir", "error");
-    console.error(e);
-  }
-
-  btn.textContent = "Enregistrer la fiche";
-  btn.disabled = false;
-}
-
-// ─── QUIZ BUILDER ──────────────────────────────────────────────
-
-// Lit tous les champs actuellement affichés et les sauvegarde dans quizItems
-function syncQuizFromDOM() {
-  quizItems.forEach((q, i) => {
-    const qInput = document.getElementById(`quiz-q-${i}`);
-    if (qInput) q.question = qInput.value;
-    q.options.forEach((opt, j) => {
-      const oInput = document.getElementById(`quiz-o-${i}-${j}`);
-      if (oInput) opt.text = oInput.value;
-      const radio = document.querySelector(`input[name="correct-${i}"][data-j="${j}"]`);
-      if (radio) opt.correct = radio.checked;
-    });
-  });
-}
-
-function addQuizQuestion() {
-  syncQuizFromDOM();
-  quizItems.push({ question: "", options: [
-    { text: "", correct: false },
-    { text: "", correct: false },
-    { text: "", correct: false }
-  ]});
-  renderQuiz();
-}
-
-function removeQuizQuestion(i) {
-  syncQuizFromDOM();
-  quizItems.splice(i, 1);
-  renderQuiz();
-}
-
-function setCorrect(i, j) {
-  quizItems[i].options.forEach((o, k) => o.correct = (k === j));
-}
-
-function renderQuiz() {
-  const container = document.getElementById('quiz-container');
-  if (quizItems.length === 0) {
-    container.innerHTML = '<div class="empty-quiz">Aucune question — clique sur "Ajouter une question"</div>';
-    return;
-  }
-  container.innerHTML = quizItems.map((q, i) => `
-    <div class="quiz-card">
-      <div class="quiz-card-header">
-        <span class="quiz-num">Q${i+1}</span>
-        <button class="icon-btn del-btn" onclick="removeQuizQuestion(${i})">✕</button>
-      </div>
-      <input class="form-input" id="quiz-q-${i}" placeholder="La question..." value="${escHtml(q.question)}">
-      <div class="quiz-options">
-        ${q.options.map((opt, j) => `
-          <div class="quiz-option">
-            <input type="radio" name="correct-${i}" data-j="${j}" ${opt.correct ? 'checked' : ''}
-              onchange="setCorrect(${i},${j})">
-            <input class="form-input" id="quiz-o-${i}-${j}" placeholder="Réponse ${j+1}" value="${escHtml(opt.text)}">
-          </div>
-        `).join('')}
-      </div>
-      <div class="quiz-hint">Coche le bouton à gauche de la bonne réponse</div>
-    </div>
-  `).join('');
-}
-
-// ─── DOMAINES & THÈMES ─────────────────────────────────────────
-async function saveDomain() {
-  const name = v('d-name');
-  if (!name) { showToast("Le nom est obligatoire", "error"); return; }
-  await addDoc(collection(db, "domains"), { name, active: true, createdAt: serverTimestamp() });
-  document.getElementById('d-name').value = '';
-  await refreshAll();
-  showToast("Domaine créé ✓", "success");
-}
-
-async function saveTheme() {
-  const name     = v('t-name');
-  const domainId = v('t-domain');
-  if (!name || !domainId) { showToast("Nom et domaine requis", "error"); return; }
-  await addDoc(collection(db, "themes"), { name, domainId, active: true, createdAt: serverTimestamp() });
-  document.getElementById('t-name').value = '';
-  await refreshAll();
-  showToast("Thème créé ✓", "success");
-}
-
-// ─── AFFICHAGE ─────────────────────────────────────────────────
-
-async function refreshAll() {
-  await loadDomains();
-  await loadThemes();
-  renderDomainTree();
-  populateSelects();
-}
-
-async function refreshSubjects() {
-  const tbody = document.getElementById('subjects-tbody');
-  tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;padding:24px;color:var(--text-muted)">Chargement...</td></tr>';
-  const subjects = await loadSubjects();
-  document.getElementById('subjects-count').textContent = subjects.length + " fiches";
-
-  if (subjects.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;padding:40px;color:var(--text-muted)">Aucune fiche — crée la première !</td></tr>';
-    return;
-  }
-
-  tbody.innerHTML = subjects.map(s => {
-    const domain = allDomains.find(d => d.id === s.domainId);
-    const theme  = allThemes.find(t => t.id === s.themeId);
-    return `<tr data-id="${s.id}">
-      <td>
-        ${s.imageUrl ? `<img src="${escHtml(s.imageUrl)}" style="width:36px;height:36px;object-fit:cover;border-radius:6px;vertical-align:middle;margin-right:8px;">` : ''}
-        <span class="primary">${escHtml(s.title)}</span>
-      </td>
-      <td><span class="domain-pill">${domain ? escHtml(domain.name) : '—'}</span></td>
-      <td><span class="theme-pill">${theme ? escHtml(theme.name) : '—'}</span></td>
-      <td>${statusPill(s.status)}</td>
-      <td>${s.isPremium ? '<span class="pill pill-orange">★ Premium</span>' : '—'}</td>
-      <td><div class="row-actions">
-        <button class="icon-btn edit-btn" onclick="openEditSubject('${s.id}')" title="Modifier">✎</button>
-        <button class="icon-btn del-btn"  onclick="confirmDelete('${s.id}')"   title="Supprimer">✕</button>
-      </div></td>
-    </tr>`;
-  }).join('');
-}
-
-function renderDomainTree() {
-  const container = document.getElementById('domain-tree');
-  if (allDomains.length === 0) {
-    container.innerHTML = '<div class="empty-tree">Aucun domaine — crée le premier ci-dessous</div>';
-    return;
-  }
-  container.innerHTML = allDomains.map(d => {
-    const themes = allThemes.filter(t => t.domainId === d.id);
-    return `
-      <div class="domain-block">
-        <div class="domain-header">
-          <span class="domain-name">${escHtml(d.name)}</span>
-          <span class="theme-badge">${themes.length} thème${themes.length !== 1 ? 's' : ''}</span>
-          <div class="row-actions" style="margin-left:auto">
-            <button class="icon-btn domain-edit-btn" data-id="${d.id}" data-name="${escHtml(d.name)}" title="Renommer">✎</button>
-            <button class="icon-btn del-btn domain-del-btn" data-id="${d.id}" title="Supprimer">✕</button>
-          </div>
-        </div>
-        <div class="themes-list">
-          ${themes.length === 0
-            ? '<span class="no-themes">Aucun thème pour l\'instant</span>'
-            : themes.map(t => `
-                <span class="theme-tag">
-                  ${escHtml(t.name)}
-                  <button class="tag-edit-btn theme-edit-btn" data-id="${t.id}" data-name="${escHtml(t.name)}" data-domain="${t.domainId}" title="Modifier">✎</button>
-                  <button class="tag-del-btn theme-del-btn"  data-id="${t.id}" title="Supprimer">✕</button>
-                </span>`).join('')
-          }
-        </div>
-      </div>`;
-  }).join('');
-}
-
-// ─── ÉDITION / SUPPRESSION DOMAINES ────────────────────────────
-
-function openEditDomain(id, currentName) {
-  const newName = prompt("Nouveau nom du domaine :", currentName);
-  if (!newName || newName.trim() === currentName) return;
-  updateDoc(doc(db, "domains", id), { name: newName.trim() })
-    .then(() => { refreshAll(); showToast("Domaine renommé ✓", "success"); })
-    .catch(() => showToast("Erreur Firebase", "error"));
-}
-
-async function confirmDeleteDomain(id) {
-  const linkedThemes = allThemes.filter(t => t.domainId === id);
-  const msg = linkedThemes.length > 0
-    ? `Ce domaine contient ${linkedThemes.length} thème(s). Les supprimer aussi ?`
-    : "Supprimer ce domaine ? Irréversible.";
-  if (!confirm(msg)) return;
-  // Supprime les thèmes liés puis le domaine
-  await Promise.all(linkedThemes.map(t => deleteDoc(doc(db, "themes", t.id))));
-  await deleteDoc(doc(db, "domains", id));
-  await refreshAll();
-  showToast("Domaine supprimé", "success");
-}
-
-// ─── ÉDITION / SUPPRESSION THÈMES ──────────────────────────────
-
-function openEditTheme(id, currentName, currentDomainId) {
-  const newName = prompt("Nouveau nom du thème :", currentName);
-  if (!newName || newName.trim() === currentName) return;
-  updateDoc(doc(db, "themes", id), { name: newName.trim() })
-    .then(() => { refreshAll(); showToast("Thème renommé ✓", "success"); })
-    .catch(() => showToast("Erreur Firebase", "error"));
-}
-
-async function confirmDeleteTheme(id) {
-  if (!confirm("Supprimer ce thème ? Les fiches associées ne seront pas supprimées mais perdront leur thème.")) return;
-  await deleteDoc(doc(db, "themes", id));
-  await refreshAll();
-  showToast("Thème supprimé", "success");
-}
-
-function populateSelects() {
-  // Menu déroulant : choisir le domaine d'un sujet
-  const fDomain = document.getElementById('f-domain');
-  fDomain.innerHTML = '<option value="">— Domaine —</option>' +
-    allDomains.map(d => `<option value="${d.id}">${escHtml(d.name)}</option>`).join('');
-
-  // Menu déroulant : choisir le domaine d'un thème (dans le formulaire thème)
-  const tDomain = document.getElementById('t-domain');
-  tDomain.innerHTML = '<option value="">— Domaine parent —</option>' +
-    allDomains.map(d => `<option value="${d.id}">${escHtml(d.name)}</option>`).join('');
-
-  // Le sélecteur de thème se met à jour quand on change le domaine
-  filterThemesByDomain();
-}
-
-// Quand on choisit un domaine dans le formulaire sujet,
-// on filtre les thèmes pour ne montrer que ceux de ce domaine
-function filterThemesByDomain() {
-  const domainId = v('f-domain');
-  const fTheme   = document.getElementById('f-theme');
-  const filtered = domainId ? allThemes.filter(t => t.domainId === domainId) : allThemes;
-  fTheme.innerHTML = '<option value="">— Thème —</option>' +
-    filtered.map(t => `<option value="${t.id}">${escHtml(t.name)}</option>`).join('');
-}
-
-// ─── FORMULAIRE SUJET (ouvrir/fermer/remplir) ──────────────────
-
-function openAddSubject() {
-  editingId = null;
-  quizItems.length = 0; // vide le tableau sans le réassigner
-  document.getElementById('subject-form').reset();
-  document.getElementById('f-image-url').value = '';
-  document.getElementById('image-preview').style.display = 'none';
-  document.getElementById('form-title').textContent = "Nouvelle fiche";
-  filterThemesByDomain();
-  renderQuiz();
-  showPanel('panel-form');
-}
-
-async function openEditSubject(id) {
-  // Charge le sujet depuis Firestore pour pré-remplir le formulaire
-  const subjects = await loadSubjects();
-  const s = subjects.find(x => x.id === id);
-  if (!s) return;
-  editingId = id;
-  quizItems.length = 0;
-  (s.quiz || []).forEach(q => quizItems.push(q)); // remplit sans réassigner
-
-  document.getElementById('form-title').textContent  = "Modifier la fiche";
-  document.getElementById('f-title').value       = s.title       || '';
-  document.getElementById('f-importance').value  = s.importance  || '';
-  document.getElementById('f-explanation').value = s.explanation || '';
-  document.getElementById('f-surprise').value    = s.surprise    || '';
-  document.getElementById('f-reference').value   = s.reference   || '';
-  document.getElementById('f-takeaway').value    = s.takeaway    || '';
-  document.getElementById('f-domain').value      = s.domainId    || '';
-  filterThemesByDomain();
-  setTimeout(() => { document.getElementById('f-theme').value = s.themeId || ''; }, 50);
-  document.getElementById('f-level').value       = s.level       || 'beginner';
-  document.getElementById('f-status').value      = s.status      || 'draft';
-  document.getElementById('f-premium').value     = s.isPremium   ? 'premium' : 'free';
-  document.getElementById('f-image-url').value   = s.imageUrl    || '';
-
-  if (s.imageUrl) {
-    const prev = document.getElementById('image-preview');
-    prev.src = s.imageUrl;
-    prev.style.display = 'block';
-  }
-
-  renderQuiz();
-  showPanel('panel-form');
-}
-
-function closeSubjectForm() {
-  showPanel('panel-subjects');
-}
-
-async function confirmDelete(id) {
-  if (!confirm("Supprimer cette fiche ? Irréversible.")) return;
-  await deleteDoc(doc(db, "subjects", id));
-  await refreshSubjects();
-  showToast("Fiche supprimée", "success");
-}
-
-// ─── NAVIGATION ENTRE PANNEAUX ─────────────────────────────────
-// L'app a 3 "panneaux" : liste sujets, formulaire, arbre domaines
-function showPanel(id) {
-  document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
-  document.getElementById(id).classList.add('active');
-  document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
-  const map = { 'panel-subjects': 'nav-subjects', 'panel-form': 'nav-subjects', 'panel-domains': 'nav-domains' };
-  document.getElementById(map[id])?.classList.add('active');
-}
-
-// ─── UTILITAIRES ───────────────────────────────────────────────
-const v = id => document.getElementById(id)?.value || '';
-
-function escHtml(str) {
-  if (!str) return '';
-  return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
-}
-
-function statusPill(s) {
-  return { published: '<span class="pill pill-green">Publié</span>', draft: '<span class="pill pill-orange">Brouillon</span>', archived: '<span class="pill pill-gray">Archivé</span>' }[s]
-    || `<span class="pill pill-gray">${escHtml(s)}</span>`;
-}
-
-function showToast(msg, type='success') {
-  const t = document.getElementById('toast');
-  const colors = { success: 'var(--green)', error: 'var(--red)', info: 'var(--accent)' };
-  t.style.borderColor = colors[type] || colors.success;
-  t.querySelector('.toast-icon').textContent = type === 'error' ? '✕' : '✓';
-  t.querySelector('#toast-msg').textContent  = msg;
-  t.classList.add('show');
-  setTimeout(() => t.classList.remove('show'), 3200);
-}
-
-// ─── EXPOSITION DES FONCTIONS AU HTML ──────────────────────────
-// Les fonctions utilisées dans les onclick="" du HTML
-// doivent être sur window pour être accessibles
-Object.assign(window, {
-  openAddSubject, openEditSubject, closeSubjectForm, confirmDelete,
-  saveSubject, saveDomain, saveTheme,
-  openEditDomain, confirmDeleteDomain,
-  openEditTheme, confirmDeleteTheme,
-  addQuizQuestion, removeQuizQuestion, setCorrect,
-  filterThemesByDomain,
-  showPanel, showToast,
-  quizItems  // exposé pour que les onclick inline puissent y accéder
-});
-
-// ─── DÉMARRAGE ─────────────────────────────────────────────────
-window.addEventListener('DOMContentLoaded', async () => {
-  showToast("Connexion à Firebase...", "info");
-  await refreshAll();
-  await refreshSubjects();
-  showToast("Knowie connecté ✓", "success");
-
-  // Upload image : quand l'utilisateur choisit un fichier
-  document.getElementById('f-image-file').addEventListener('change', async (e) => {
-    const file = e.target.files[0];
-    if (!file) return;
-    const progress = document.getElementById('upload-progress');
-    try {
-      const url = await uploadImage(file, progress);
-      document.getElementById('f-image-url').value = url;
-      // Affiche un aperçu immédiatement
-      const prev = document.getElementById('image-preview');
-      prev.src   = url;
-      prev.style.display = 'block';
-    } catch(err) {
-      showToast("Erreur upload — vérifie Firebase Storage", "error");
-      console.error(err);
-    }
-  });
-
-  // Met à jour la liste de thèmes quand on change le domaine
-  document.getElementById('f-domain').addEventListener('change', filterThemesByDomain);
-
-  // Délégation d'événements pour domaines et thèmes
-  // Au lieu d'un onclick sur chaque bouton, on écoute le conteneur parent
-  document.getElementById('domain-tree').addEventListener('click', e => {
-    const btn = e.target.closest('button');
-    if (!btn) return;
-    const id   = btn.dataset.id;
-    const name = btn.dataset.name;
-
-    if (btn.classList.contains('domain-edit-btn')) openEditDomain(id, name);
-    if (btn.classList.contains('domain-del-btn'))  confirmDeleteDomain(id);
-    if (btn.classList.contains('theme-edit-btn'))  openEditTheme(id, name, btn.dataset.domain);
-    if (btn.classList.contains('theme-del-btn'))   confirmDeleteTheme(id);
-  });
-
-  // Recherche dans la liste de sujets
-  document.getElementById('search-input').addEventListener('input', (e) => {
-    const q = e.target.value.toLowerCase();
-    document.querySelectorAll('#subjects-tbody tr').forEach(r => {
-      r.style.display = r.textContent.toLowerCase().includes(q) ? '' : 'none';
-    });
-  });
-});
-</script>
-
 <style>
 :root {
   --bg:#0f0e0d; --surface:#1a1917; --surface2:#242220; --surface3:#2e2b27;
   --border:#2e2c29; --accent:#e8c87a; --text:#f0ede8;
   --text-muted:#7a7570; --text-soft:#b0ab9e;
-  --green:#4a9b6f; --red:#c45c3a; --purple:#7c6aad;
+  --green:#4a9b6f; --red:#c45c3a;
   --radius:10px;
   --font-display:'Playfair Display',Georgia,serif;
   --font-body:'DM Sans',sans-serif;
@@ -527,180 +19,749 @@ window.addEventListener('DOMContentLoaded', async () => {
 body{background:var(--bg);color:var(--text);font-family:var(--font-body);font-size:14px;min-height:100vh;display:flex;}
 
 /* ── Sidebar ── */
-.sidebar{width:220px;min-height:100vh;background:var(--surface);border-right:1px solid var(--border);display:flex;flex-direction:column;padding:28px 0;position:fixed;top:0;left:0;bottom:0;}
+.sidebar{width:220px;min-height:100vh;background:var(--surface);border-right:1px solid var(--border);display:flex;flex-direction:column;padding:28px 0;position:fixed;top:0;left:0;bottom:0;z-index:50;}
 .logo{padding:0 24px 20px;border-bottom:1px solid var(--border);margin-bottom:14px;}
 .logo-name{font-family:var(--font-display);font-size:22px;color:var(--accent);}
 .logo-sub{font-size:11px;color:var(--text-muted);letter-spacing:1.5px;text-transform:uppercase;margin-top:2px;}
 .firebase-badge{margin:0 14px 14px;padding:6px 10px;background:rgba(74,155,111,0.1);border:1px solid rgba(74,155,111,0.25);border-radius:6px;font-size:11px;color:#6fcf97;display:flex;align-items:center;gap:6px;}
-.dot-live{width:6px;height:6px;background:var(--green);border-radius:50%;animation:pulse 2s infinite;flex-shrink:0;}
+.dot{width:6px;height:6px;background:var(--green);border-radius:50%;animation:pulse 2s infinite;flex-shrink:0;}
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:0.3}}
-.nav-section{padding:6px 12px;}
-.nav-label{font-size:10px;letter-spacing:1.5px;text-transform:uppercase;color:var(--text-muted);padding:0 12px;margin:10px 0 4px;}
-.nav-item{display:flex;align-items:center;gap:10px;padding:9px 12px;border-radius:8px;cursor:pointer;color:var(--text-soft);transition:all .15s;border:none;background:none;width:100%;text-align:left;font-family:var(--font-body);font-size:13.5px;}
+.nav-label{font-size:10px;letter-spacing:1.5px;text-transform:uppercase;color:var(--text-muted);padding:0 24px;margin:12px 0 4px;}
+.nav-item{display:flex;align-items:center;gap:10px;padding:9px 12px;margin:0 12px;border-radius:8px;cursor:pointer;color:var(--text-soft);transition:all .15s;border:none;background:none;width:calc(100% - 24px);text-align:left;font-family:var(--font-body);font-size:13.5px;}
 .nav-item:hover{background:var(--surface2);color:var(--text);}
 .nav-item.active{background:rgba(232,200,122,0.12);color:var(--accent);}
-.nav-icon{font-size:15px;width:20px;text-align:center;}
+.sidebar-footer{margin-top:auto;padding:14px 24px;border-top:1px solid var(--border);color:var(--text-muted);font-size:11px;line-height:1.6;}
 
-/* ── Panneaux ── */
-.main{margin-left:220px;flex:1;display:flex;flex-direction:column;}
-.panel{display:none;flex:1;}
-.panel.active{display:flex;flex-direction:column;}
+/* ── Layout ── */
+.main{margin-left:220px;flex:1;display:flex;flex-direction:column;min-height:100vh;}
+.panel{display:none;flex:1;flex-direction:column;}
+.panel.active{display:flex;}
 
-/* ── Panel : liste sujets ── */
-.panel-header{display:flex;align-items:center;justify-content:space-between;padding:28px 36px 20px;border-bottom:1px solid var(--border);}
+/* ── Panel header ── */
+.panel-header{display:flex;align-items:center;justify-content:space-between;padding:28px 36px 20px;border-bottom:1px solid var(--border);flex-shrink:0;}
 .page-title{font-family:var(--font-display);font-size:26px;font-weight:400;}
-.page-sub{color:var(--text-muted);font-size:13px;margin-top:3px;}
+.page-sub{color:var(--text-muted);font-size:13px;margin-top:4px;}
 
-.table-wrap{flex:1;overflow:auto;}
+/* ── Table ── */
 .table-top{display:flex;align-items:center;justify-content:space-between;padding:14px 36px;border-bottom:1px solid var(--border);}
-.table-title{font-weight:500;font-size:13.5px;}
+.table-count{font-weight:500;font-size:13.5px;}
 .search-input{background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:7px 12px;color:var(--text);font-family:var(--font-body);font-size:13px;width:220px;outline:none;transition:border-color .15s;}
 .search-input:focus{border-color:var(--accent);}
 .search-input::placeholder{color:var(--text-muted);}
+.table-wrap{flex:1;overflow:auto;}
 table{width:100%;border-collapse:collapse;}
-thead th{text-align:left;padding:11px 20px;font-size:11px;letter-spacing:1px;text-transform:uppercase;color:var(--text-muted);border-bottom:1px solid var(--border);font-weight:400;background:var(--surface);}
+thead th{text-align:left;padding:11px 20px;font-size:11px;letter-spacing:1px;text-transform:uppercase;color:var(--text-muted);border-bottom:1px solid var(--border);font-weight:400;background:var(--surface);position:sticky;top:0;}
 tbody tr{border-bottom:1px solid var(--border);transition:background .1s;}
 tbody tr:last-child{border-bottom:none;}
 tbody tr:hover{background:var(--surface2);}
 td{padding:12px 20px;color:var(--text-soft);font-size:13.5px;vertical-align:middle;}
-.primary{color:var(--text);font-weight:500;}
+td.bold{color:var(--text);font-weight:500;}
 
+/* ── Pills ── */
 .pill{display:inline-flex;align-items:center;gap:4px;padding:3px 9px;border-radius:20px;font-size:11.5px;font-weight:500;}
 .pill::before{content:'●';font-size:7px;}
 .pill-green{background:rgba(74,155,111,0.15);color:#6fcf97;}
 .pill-orange{background:rgba(232,200,122,0.12);color:var(--accent);}
 .pill-gray{background:var(--surface2);color:var(--text-muted);}
-.domain-pill{display:inline-block;padding:3px 9px;border-radius:20px;font-size:11.5px;font-weight:500;background:rgba(124,106,173,0.15);color:#a991e8;}
-.theme-pill{display:inline-block;padding:3px 9px;border-radius:20px;font-size:11.5px;font-weight:500;background:var(--surface2);color:var(--text-soft);}
+.tag{display:inline-block;padding:3px 9px;border-radius:20px;font-size:11.5px;font-weight:500;background:var(--surface2);color:var(--text-soft);}
+.tag-domain{background:rgba(124,106,173,0.15);color:#a991e8;}
 
-.row-actions{display:flex;gap:5px;}
-.icon-btn{background:var(--surface2);border:1px solid var(--border);border-radius:6px;color:var(--text-muted);width:28px;height:28px;cursor:pointer;font-size:13px;display:flex;align-items:center;justify-content:center;transition:all .15s;}
-.icon-btn:hover{color:var(--text);border-color:#444;}
-.icon-btn.del-btn:hover{color:var(--red);border-color:var(--red);background:rgba(196,92,58,.1);}
-
-/* ── Panel : formulaire ── */
-#panel-form{overflow-y:auto;}
-.form-header{display:flex;align-items:center;gap:16px;padding:24px 36px;border-bottom:1px solid var(--border);position:sticky;top:0;background:var(--bg);z-index:10;}
-.form-header-title{font-family:var(--font-display);font-size:22px;flex:1;}
-.form-body{padding:28px 36px;max-width:800px;}
-.section-title{font-size:11px;letter-spacing:1.5px;text-transform:uppercase;color:var(--accent);margin:28px 0 14px;padding-bottom:8px;border-bottom:1px solid var(--border);}
-.section-title:first-child{margin-top:0;}
-.form-group{margin-bottom:16px;}
-.form-label{display:block;font-size:12px;letter-spacing:.7px;text-transform:uppercase;color:var(--text-muted);margin-bottom:6px;}
-.form-label .hint{font-size:11px;color:var(--text-muted);text-transform:none;letter-spacing:0;margin-left:6px;opacity:0.7;}
-.form-input,.form-select,.form-textarea{width:100%;background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:10px 13px;color:var(--text);font-family:var(--font-body);font-size:13.5px;outline:none;transition:border-color .15s;}
-.form-input:focus,.form-select:focus,.form-textarea:focus{border-color:var(--accent);}
-.form-select{appearance:none;cursor:pointer;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%237a7570'/%3E%3C/svg%3E");background-repeat:no-repeat;background-position:right 12px center;}
-.form-textarea{resize:vertical;min-height:110px;line-height:1.65;}
-.form-textarea.tall{min-height:160px;}
-.form-row{display:grid;grid-template-columns:1fr 1fr;gap:14px;}
-.form-row-3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:14px;}
-
-/* ── Image upload ── */
-.image-upload-zone{border:1.5px dashed var(--border);border-radius:10px;padding:20px;text-align:center;cursor:pointer;transition:border-color .15s;position:relative;}
-.image-upload-zone:hover{border-color:var(--accent);}
-.image-upload-zone input[type=file]{position:absolute;inset:0;opacity:0;cursor:pointer;width:100%;height:100%;}
-.upload-label{font-size:13px;color:var(--text-muted);}
-.upload-label strong{color:var(--accent);}
-#image-preview{width:100%;max-height:160px;object-fit:cover;border-radius:8px;margin-top:12px;display:none;}
-#upload-progress{font-size:12px;color:var(--green);margin-top:8px;display:none;}
-.image-url-row{display:flex;gap:8px;margin-top:10px;}
-.image-url-row .form-input{flex:1;}
-
-/* ── Quiz builder ── */
-.quiz-card{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:16px;margin-bottom:12px;}
-.quiz-card-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;}
-.quiz-num{font-size:11px;letter-spacing:1px;text-transform:uppercase;color:var(--accent);font-weight:500;}
-.quiz-options{display:flex;flex-direction:column;gap:8px;margin-top:10px;}
-.quiz-option{display:flex;align-items:center;gap:8px;}
-.quiz-option input[type=radio]{accent-color:var(--accent);width:16px;height:16px;flex-shrink:0;cursor:pointer;}
-.quiz-hint{font-size:11px;color:var(--text-muted);margin-top:8px;}
-.empty-quiz{padding:20px;text-align:center;color:var(--text-muted);font-size:13px;border:1.5px dashed var(--border);border-radius:10px;}
-
-/* ── Panel : domaines ── */
-.domains-body{padding:28px 36px;display:grid;grid-template-columns:1fr 1fr;gap:24px;overflow-y:auto;}
-.create-card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:24px;}
-.create-card-title{font-weight:500;font-size:14px;margin-bottom:16px;color:var(--text);}
-.domain-tree-wrap{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:24px;}
-.domain-tree-title{font-weight:500;font-size:14px;margin-bottom:16px;}
-.domain-block{margin-bottom:16px;padding-bottom:16px;border-bottom:1px solid var(--border);}
-.domain-block:last-child{margin-bottom:0;padding-bottom:0;border-bottom:none;}
-.domain-header{display:flex;align-items:center;gap:10px;margin-bottom:8px;}
-.domain-emoji{font-size:20px;}
-.domain-name{font-weight:500;color:var(--text);}
-.theme-badge{margin-left:auto;font-size:11px;color:var(--text-muted);}
-.themes-list{display:flex;flex-wrap:wrap;gap:6px;padding-left:30px;}
-.theme-tag{display:inline-flex;align-items:center;gap:5px;padding:3px 8px;border-radius:20px;font-size:12px;background:var(--surface2);color:var(--text-soft);border:1px solid var(--border);cursor:default;}
-.tag-edit-btn,.tag-del-btn{background:none;border:none;cursor:pointer;font-size:11px;color:var(--text-muted);padding:0 2px;line-height:1;transition:color .15s;pointer-events:all;}
-.tag-edit-btn:hover{color:var(--accent);}
-.tag-del-btn:hover{color:var(--red);}
-.no-themes{font-size:12px;color:var(--text-muted);}
-.empty-tree{padding:20px;text-align:center;color:var(--text-muted);font-size:13px;}
-
-/* ── Boutons ── */
+/* ── Buttons ── */
 .btn{display:inline-flex;align-items:center;gap:7px;padding:9px 18px;border-radius:var(--radius);font-family:var(--font-body);font-size:13.5px;font-weight:500;cursor:pointer;transition:all .15s;border:none;}
 .btn-primary{background:var(--accent);color:#1a1710;}
 .btn-primary:hover{background:#f0d48a;}
 .btn-primary:disabled{opacity:.6;cursor:not-allowed;}
 .btn-secondary{background:var(--surface2);color:var(--text-soft);border:1px solid var(--border);}
 .btn-secondary:hover{color:var(--text);}
-.btn-sm{padding:6px 12px;font-size:12.5px;}
 .btn-ghost{background:none;border:1px solid var(--border);color:var(--text-muted);}
 .btn-ghost:hover{color:var(--text);border-color:#555;}
+.btn-sm{padding:6px 12px;font-size:12.5px;}
+.icon-btn{background:var(--surface2);border:1px solid var(--border);border-radius:6px;color:var(--text-muted);width:28px;height:28px;cursor:pointer;font-size:13px;display:inline-flex;align-items:center;justify-content:center;transition:all .15s;}
+.icon-btn:hover{color:var(--text);border-color:#555;}
+.icon-btn.danger:hover{color:var(--red);border-color:var(--red);background:rgba(196,92,58,.1);}
+.row-actions{display:flex;gap:5px;}
+
+/* ── Form panel ── */
+.form-header{display:flex;align-items:center;gap:16px;padding:18px 36px;border-bottom:1px solid var(--border);background:var(--bg);position:sticky;top:0;z-index:10;flex-shrink:0;}
+.form-header-title{font-family:var(--font-display);font-size:20px;flex:1;}
+.form-body{padding:28px 36px;max-width:780px;overflow-y:auto;flex:1;}
+
+.section-label{font-size:11px;letter-spacing:1.5px;text-transform:uppercase;color:var(--accent);margin:32px 0 6px;padding-bottom:8px;border-bottom:1px solid var(--border);}
+.section-label:first-child{margin-top:0;}
+.section-hint{font-size:11px;color:var(--text-muted);letter-spacing:0;text-transform:none;font-weight:300;margin-left:6px;}
+
+.form-group{margin-bottom:16px;}
+.form-label{display:block;font-size:12px;letter-spacing:.7px;text-transform:uppercase;color:var(--text-muted);margin-bottom:6px;}
+.form-hint{font-size:11px;color:var(--text-muted);margin-top:4px;}
+.form-input,.form-select,.form-textarea{width:100%;background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:10px 13px;color:var(--text);font-family:var(--font-body);font-size:13.5px;outline:none;transition:border-color .15s;}
+.form-input:focus,.form-select:focus,.form-textarea:focus{border-color:var(--accent);}
+.form-select{appearance:none;cursor:pointer;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%237a7570'/%3E%3C/svg%3E");background-repeat:no-repeat;background-position:right 12px center;}
+.form-textarea{resize:vertical;min-height:100px;line-height:1.65;}
+.form-row{display:grid;grid-template-columns:1fr 1fr;gap:14px;}
+.form-row-3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:14px;}
+
+/* ── Slide blocks ── */
+.blocks-container{display:flex;flex-direction:column;gap:10px;margin-bottom:10px;}
+.block-card{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:14px;transition:border-color .15s;}
+.block-card:focus-within{border-color:rgba(232,200,122,0.4);}
+.block-top{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;}
+.block-label{font-size:11px;letter-spacing:1px;text-transform:uppercase;color:var(--accent);font-weight:500;}
+.block-actions{display:flex;gap:4px;}
+.block-textarea{background:var(--surface2);min-height:90px;border-radius:8px;}
+.empty-blocks{padding:16px;text-align:center;color:var(--text-muted);font-size:13px;border:1.5px dashed var(--border);border-radius:10px;}
+
+/* ── Quiz builder ── */
+.quiz-card{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:16px;margin-bottom:10px;}
+.quiz-top{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;}
+.quiz-label{font-size:11px;letter-spacing:1px;text-transform:uppercase;color:var(--accent);font-weight:500;}
+.quiz-options{display:flex;flex-direction:column;gap:8px;margin-top:10px;}
+.quiz-option{display:flex;align-items:center;gap:8px;}
+.quiz-option input[type=radio]{accent-color:var(--accent);width:16px;height:16px;flex-shrink:0;cursor:pointer;}
+.quiz-hint-text{font-size:11px;color:var(--text-muted);margin-top:8px;}
+.empty-quiz{padding:16px;text-align:center;color:var(--text-muted);font-size:13px;border:1.5px dashed var(--border);border-radius:10px;}
+
+/* ── Image upload ── */
+.upload-zone{border:1.5px dashed var(--border);border-radius:10px;padding:20px;text-align:center;cursor:pointer;transition:border-color .15s;position:relative;}
+.upload-zone:hover{border-color:var(--accent);}
+.upload-zone input[type=file]{position:absolute;inset:0;opacity:0;cursor:pointer;width:100%;height:100%;}
+.upload-label{font-size:13px;color:var(--text-muted);}
+.upload-label strong{color:var(--accent);}
+#image-preview{width:100%;max-height:160px;object-fit:cover;border-radius:8px;margin-top:12px;display:none;}
+#upload-progress{font-size:12px;color:var(--green);margin-top:8px;display:none;}
+
+/* ── Domains panel ── */
+.domains-grid{display:grid;grid-template-columns:1fr 1fr;gap:20px;padding:28px 36px;overflow-y:auto;}
+.create-card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:22px;}
+.create-card-title{font-weight:500;font-size:14px;margin-bottom:16px;}
+.tree-card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:22px;grid-column:1/-1;}
+.tree-title{font-weight:500;font-size:14px;margin-bottom:16px;}
+.domain-block{margin-bottom:14px;padding-bottom:14px;border-bottom:1px solid var(--border);}
+.domain-block:last-child{margin-bottom:0;padding-bottom:0;border-bottom:none;}
+.domain-row{display:flex;align-items:center;gap:10px;margin-bottom:8px;}
+.domain-name{font-weight:500;color:var(--text);}
+.theme-count{font-size:11px;color:var(--text-muted);margin-left:auto;}
+.themes-row{display:flex;flex-wrap:wrap;gap:6px;padding-left:8px;}
+.theme-chip{display:inline-flex;align-items:center;gap:4px;padding:3px 8px;border-radius:20px;font-size:12px;background:var(--surface2);color:var(--text-soft);border:1px solid var(--border);}
+.chip-btn{background:none;border:none;cursor:pointer;font-size:10px;color:var(--text-muted);padding:0 1px;line-height:1;transition:color .15s;pointer-events:all;}
+.chip-btn:hover{color:var(--accent);}
+.chip-btn.del:hover{color:var(--red);}
+.no-themes{font-size:12px;color:var(--text-muted);}
+.empty-tree{padding:20px;text-align:center;color:var(--text-muted);}
 
 /* ── Toast ── */
-.toast{position:fixed;bottom:24px;right:24px;background:var(--surface);border:1px solid var(--green);border-radius:10px;padding:13px 18px;font-size:13.5px;color:var(--text);transform:translateY(70px);opacity:0;transition:all .3s;z-index:200;display:flex;align-items:center;gap:10px;box-shadow:0 4px 20px rgba(0,0,0,.4);}
+.toast{position:fixed;bottom:24px;right:24px;background:var(--surface);border:1px solid var(--green);border-radius:10px;padding:13px 18px;font-size:13.5px;color:var(--text);transform:translateY(70px);opacity:0;transition:all .3s;z-index:999;display:flex;align-items:center;gap:10px;box-shadow:0 4px 20px rgba(0,0,0,.5);}
 .toast.show{transform:translateY(0);opacity:1;}
 </style>
+
+<script type="module">
+import { initializeApp }    from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
+import { getFirestore, collection, addDoc, getDocs, updateDoc, deleteDoc, doc, serverTimestamp, query, orderBy }
+                            from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
+import { getStorage, ref, uploadBytes, getDownloadURL }
+                            from "https://www.gstatic.com/firebasejs/10.12.0/firebase-storage.js";
+
+const app = initializeApp({
+  apiKey: "AIzaSyAd67RhjiBm6Da8Rp5cVhpkA_Tk47_6k6Y",
+  authDomain: "knowie-77fde.firebaseapp.com",
+  projectId: "knowie-77fde",
+  storageBucket: "knowie-77fde.firebasestorage.app",
+  messagingSenderId: "427764303215",
+  appId: "1:427764303215:web:0240a51884d17c6a49149a"
+});
+const db      = getFirestore(app);
+const storage = getStorage(app);
+
+// ═══════════════════════════════════════════════
+// ÉTAT GLOBAL
+// ═══════════════════════════════════════════════
+let allDomains = [];
+let allThemes  = [];
+let editingId  = null;
+
+// Blocs de texte (slides) — chaque section est un tableau de strings
+// Chaque string = une slide dans l'app mobile
+const slides = {
+  importance : [],
+  explanation: [],
+  surprise   : [],
+  reference  : []
+};
+
+// Questions du quiz
+let quiz = [];
+
+// ═══════════════════════════════════════════════
+// FIREBASE — LECTURE
+// ═══════════════════════════════════════════════
+async function loadDomains() {
+  const snap = await getDocs(collection(db, "domains"));
+  allDomains = [];
+  snap.forEach(d => allDomains.push({ id: d.id, ...d.data() }));
+}
+
+async function loadThemes() {
+  const snap = await getDocs(collection(db, "themes"));
+  allThemes = [];
+  snap.forEach(d => allThemes.push({ id: d.id, ...d.data() }));
+}
+
+async function loadSubjects() {
+  try {
+    const snap = await getDocs(query(collection(db, "subjects"), orderBy("createdAt","desc")));
+    const out = [];
+    snap.forEach(d => out.push({ id: d.id, ...d.data() }));
+    return out;
+  } catch { return []; }
+}
+
+// ═══════════════════════════════════════════════
+// FIREBASE — ÉCRITURE
+// ═══════════════════════════════════════════════
+async function uploadImage(file) {
+  const r   = ref(storage, `subjects/images/${Date.now()}_${file.name}`);
+  const el  = document.getElementById('upload-progress');
+  el.textContent = "Envoi en cours..."; el.style.display = "block";
+  await uploadBytes(r, file);
+  const url = await getDownloadURL(r);
+  el.textContent = "✓ Uploadée"; setTimeout(() => el.style.display="none", 2000);
+  return url;
+}
+
+// ═══════════════════════════════════════════════
+// SLIDES — GESTION DES BLOCS
+// ═══════════════════════════════════════════════
+
+// Lit les textareas affichés et met à jour le tableau en mémoire
+function syncSlides(section) {
+  slides[section].forEach((_, i) => {
+    const el = document.getElementById(`slide-${section}-${i}`);
+    if (el) slides[section][i] = el.value;
+  });
+}
+
+// Ajoute un bloc vide et re-render
+function addSlide(section) {
+  syncSlides(section);
+  slides[section].push('');
+  renderSlides(section);
+  setTimeout(() => {
+    const el = document.getElementById(`slide-${section}-${slides[section].length - 1}`);
+    if (el) el.focus();
+  }, 40);
+}
+
+// Supprime un bloc et re-render
+function removeSlide(section, i) {
+  syncSlides(section);
+  slides[section].splice(i, 1);
+  renderSlides(section);
+}
+
+// Monte / descend un bloc
+function moveSlide(section, i, dir) {
+  syncSlides(section);
+  const j = i + dir;
+  if (j < 0 || j >= slides[section].length) return;
+  [slides[section][i], slides[section][j]] = [slides[section][j], slides[section][i]];
+  renderSlides(section);
+}
+
+// Affiche les blocs d'une section dans le DOM
+function renderSlides(section) {
+  const container = document.getElementById(`slides-${section}`);
+  if (!container) return;
+  if (slides[section].length === 0) {
+    container.innerHTML = `<div class="empty-blocks">Aucune slide — clique sur "+ Ajouter une slide"</div>`;
+    return;
+  }
+  const total = slides[section].length;
+  container.innerHTML = slides[section].map((text, i) => `
+    <div class="block-card">
+      <div class="block-top">
+        <span class="block-label">Slide ${i+1} / ${total}</span>
+        <div class="block-actions">
+          ${i > 0        ? `<button class="icon-btn" onclick="window.moveSlide('${section}',${i},-1)" title="Monter">↑</button>` : ''}
+          ${i < total-1  ? `<button class="icon-btn" onclick="window.moveSlide('${section}',${i},1)"  title="Descendre">↓</button>` : ''}
+          <button class="icon-btn danger" onclick="window.removeSlide('${section}',${i})" title="Supprimer">✕</button>
+        </div>
+      </div>
+      <textarea class="form-textarea block-textarea" id="slide-${section}-${i}"
+        placeholder="Contenu de cette slide...">${esc(text)}</textarea>
+    </div>
+  `).join('');
+}
+
+function renderAllSlides() {
+  Object.keys(slides).forEach(s => renderSlides(s));
+}
+
+function clearSlides() {
+  Object.keys(slides).forEach(s => { slides[s].length = 0; });
+  renderAllSlides();
+}
+
+// Charge les slides depuis les données Firebase
+function loadSlidesFrom(data) {
+  Object.keys(slides).forEach(s => {
+    slides[s].length = 0;
+    const saved = data[s];
+    if (Array.isArray(saved)) saved.forEach(b => slides[s].push(b));
+    else if (typeof saved === 'string' && saved.trim()) slides[s].push(saved);
+    // ↑ Compatibilité avec les anciennes fiches en texte simple
+  });
+  renderAllSlides();
+}
+
+// Lit tous les slides du DOM et retourne les tableaux finaux
+function getSlidesData() {
+  Object.keys(slides).forEach(s => syncSlides(s));
+  return {
+    importance : [...slides.importance.filter(b => b.trim())],
+    explanation: [...slides.explanation.filter(b => b.trim())],
+    surprise   : [...slides.surprise.filter(b => b.trim())],
+    reference  : [...slides.reference.filter(b => b.trim())]
+  };
+}
+
+// ═══════════════════════════════════════════════
+// QUIZ — GESTION
+// ═══════════════════════════════════════════════
+function syncQuiz() {
+  quiz.forEach((q, i) => {
+    const el = document.getElementById(`quiz-q-${i}`);
+    if (el) q.question = el.value;
+    q.options.forEach((opt, j) => {
+      const oel = document.getElementById(`quiz-o-${i}-${j}`);
+      if (oel) opt.text = oel.value;
+    });
+  });
+}
+
+function addQuestion() {
+  syncQuiz();
+  quiz.push({ question:"", options:[
+    {text:"",correct:false},{text:"",correct:false},{text:"",correct:false}
+  ]});
+  renderQuiz();
+}
+
+function removeQuestion(i) {
+  syncQuiz();
+  quiz.splice(i, 1);
+  renderQuiz();
+}
+
+function setCorrect(i, j) {
+  quiz[i].options.forEach((o, k) => o.correct = (k === j));
+}
+
+function renderQuiz() {
+  const c = document.getElementById('quiz-container');
+  if (!c) return;
+  if (quiz.length === 0) {
+    c.innerHTML = '<div class="empty-quiz">Aucune question — clique sur "+ Ajouter une question"</div>';
+    return;
+  }
+  c.innerHTML = quiz.map((q, i) => `
+    <div class="quiz-card">
+      <div class="quiz-top">
+        <span class="quiz-label">Question ${i+1}</span>
+        <button class="icon-btn danger" onclick="window.removeQuestion(${i})">✕</button>
+      </div>
+      <input class="form-input" id="quiz-q-${i}" placeholder="La question..." value="${esc(q.question)}">
+      <div class="quiz-options">
+        ${q.options.map((opt,j) => `
+          <div class="quiz-option">
+            <input type="radio" name="c-${i}" data-j="${j}" ${opt.correct?'checked':''}
+              onchange="window.setCorrect(${i},${j})">
+            <input class="form-input" id="quiz-o-${i}-${j}"
+              placeholder="Réponse ${j+1}" value="${esc(opt.text)}">
+          </div>
+        `).join('')}
+      </div>
+      <div class="quiz-hint-text">Coche le bouton à gauche de la bonne réponse</div>
+    </div>
+  `).join('');
+}
+
+// ═══════════════════════════════════════════════
+// SUJETS — SAUVEGARDE
+// ═══════════════════════════════════════════════
+async function saveSubject() {
+  syncQuiz();
+  const sData = getSlidesData();
+  const title = document.getElementById('f-title').value.trim();
+  const domainId = document.getElementById('f-domain').value;
+  const themeId  = document.getElementById('f-theme').value;
+
+  if (!title || !domainId || !themeId) {
+    toast("Titre, domaine et thème sont obligatoires", "error"); return;
+  }
+
+  const btn = document.getElementById('save-btn');
+  btn.textContent = "Enregistrement..."; btn.disabled = true;
+
+  const data = {
+    title,
+    importance : sData.importance,
+    explanation: sData.explanation,
+    surprise   : sData.surprise,
+    reference  : sData.reference,
+    takeaway   : document.getElementById('f-takeaway').value.trim(),
+    domainId, themeId,
+    level      : document.getElementById('f-level').value,
+    status     : document.getElementById('f-status').value,
+    isPremium  : document.getElementById('f-premium').value === 'premium',
+    imageUrl   : document.getElementById('f-image-url').value.trim(),
+    quiz,
+    updatedAt  : serverTimestamp()
+  };
+
+  try {
+    if (editingId) {
+      await updateDoc(doc(db, "subjects", editingId), data);
+    } else {
+      await addDoc(collection(db, "subjects"), { ...data, createdAt: serverTimestamp() });
+    }
+    showPanel('subjects');
+    await refreshSubjects();
+    toast(editingId ? "Fiche mise à jour ✓" : "Fiche créée ✓", "success");
+    editingId = null;
+  } catch(e) {
+    toast("Erreur Firebase — voir console (F12)", "error");
+    console.error(e);
+  }
+  btn.textContent = "Enregistrer la fiche"; btn.disabled = false;
+}
+
+// ═══════════════════════════════════════════════
+// SUJETS — AFFICHAGE
+// ═══════════════════════════════════════════════
+async function refreshSubjects() {
+  const tbody = document.getElementById('subjects-tbody');
+  tbody.innerHTML = `<tr><td colspan="6" style="text-align:center;padding:30px;color:var(--text-muted)">Chargement...</td></tr>`;
+  const subjects = await loadSubjects();
+  document.getElementById('subjects-count').textContent = subjects.length + " fiche" + (subjects.length !== 1 ? "s" : "");
+
+  if (!subjects.length) {
+    tbody.innerHTML = `<tr><td colspan="6" style="text-align:center;padding:40px;color:var(--text-muted)">Aucune fiche — crée la première !</td></tr>`;
+    return;
+  }
+  tbody.innerHTML = subjects.map(s => {
+    const domain = allDomains.find(d => d.id === s.domainId);
+    const theme  = allThemes.find(t => t.id === s.themeId);
+    const statusMap = {
+      published: '<span class="pill pill-green">Publié</span>',
+      draft:     '<span class="pill pill-orange">Brouillon</span>',
+      archived:  '<span class="pill pill-gray">Archivé</span>'
+    };
+    return `<tr>
+      <td class="bold">${esc(s.title)}</td>
+      <td>${domain ? `<span class="tag tag-domain">${esc(domain.name)}</span>` : '—'}</td>
+      <td>${theme  ? `<span class="tag">${esc(theme.name)}</span>` : '—'}</td>
+      <td>${statusMap[s.status] || `<span class="pill pill-gray">${esc(s.status)}</span>`}</td>
+      <td>${s.isPremium ? '<span class="pill pill-orange">★ Premium</span>' : '—'}</td>
+      <td><div class="row-actions">
+        <button class="icon-btn" onclick="window.openEdit('${s.id}')" title="Modifier">✎</button>
+        <button class="icon-btn danger" onclick="window.deleteSubject('${s.id}')" title="Supprimer">✕</button>
+      </div></td>
+    </tr>`;
+  }).join('');
+}
+
+// ═══════════════════════════════════════════════
+// FORMULAIRE — OUVRIR / FERMER
+// ═══════════════════════════════════════════════
+function openNew() {
+  editingId = null;
+  quiz.length = 0;
+  clearSlides();
+  document.getElementById('subject-form').reset();
+  document.getElementById('f-image-url').value = '';
+  document.getElementById('image-preview').style.display = 'none';
+  document.getElementById('form-title').textContent = "Nouvelle fiche";
+  filterThemes();
+  renderQuiz();
+  showPanel('form');
+}
+
+async function openEdit(id) {
+  const subjects = await loadSubjects();
+  const s = subjects.find(x => x.id === id);
+  if (!s) return;
+  editingId = id;
+
+  // Champs simples
+  document.getElementById('f-title').value    = s.title    || '';
+  document.getElementById('f-takeaway').value = s.takeaway || '';
+  document.getElementById('f-level').value    = s.level    || 'beginner';
+  document.getElementById('f-status').value   = s.status   || 'draft';
+  document.getElementById('f-premium').value  = s.isPremium ? 'premium' : 'free';
+  document.getElementById('f-image-url').value = s.imageUrl || '';
+  document.getElementById('f-domain').value   = s.domainId || '';
+  filterThemes();
+  setTimeout(() => { document.getElementById('f-theme').value = s.themeId || ''; }, 60);
+
+  if (s.imageUrl) {
+    const p = document.getElementById('image-preview');
+    p.src = s.imageUrl; p.style.display = 'block';
+  } else {
+    document.getElementById('image-preview').style.display = 'none';
+  }
+
+  // Slides et quiz
+  loadSlidesFrom(s);
+  quiz.length = 0;
+  (s.quiz || []).forEach(q => quiz.push(q));
+  renderQuiz();
+
+  document.getElementById('form-title').textContent = "Modifier la fiche";
+  showPanel('form');
+}
+
+async function deleteSubject(id) {
+  if (!confirm("Supprimer cette fiche ? Irréversible.")) return;
+  await deleteDoc(doc(db, "subjects", id));
+  await refreshSubjects();
+  toast("Fiche supprimée", "success");
+}
+
+// ═══════════════════════════════════════════════
+// DOMAINES & THÈMES
+// ═══════════════════════════════════════════════
+async function refreshDomains() {
+  await loadDomains();
+  await loadThemes();
+  renderTree();
+  fillDomainSelects();
+}
+
+async function saveDomain() {
+  const name = document.getElementById('d-name').value.trim();
+  if (!name) { toast("Nom requis", "error"); return; }
+  await addDoc(collection(db, "domains"), { name, active:true, createdAt: serverTimestamp() });
+  document.getElementById('d-name').value = '';
+  await refreshDomains();
+  toast("Domaine créé ✓", "success");
+}
+
+async function saveTheme() {
+  const name     = document.getElementById('t-name').value.trim();
+  const domainId = document.getElementById('t-domain').value;
+  if (!name || !domainId) { toast("Nom et domaine requis", "error"); return; }
+  await addDoc(collection(db, "themes"), { name, domainId, active:true, createdAt: serverTimestamp() });
+  document.getElementById('t-name').value = '';
+  await refreshDomains();
+  toast("Thème créé ✓", "success");
+}
+
+function editDomain(id, name) {
+  const n = prompt("Nouveau nom :", name);
+  if (!n || n.trim() === name) return;
+  updateDoc(doc(db, "domains", id), { name: n.trim() })
+    .then(() => { refreshDomains(); toast("Domaine renommé ✓", "success"); });
+}
+
+async function delDomain(id) {
+  const linked = allThemes.filter(t => t.domainId === id);
+  const msg = linked.length
+    ? `Ce domaine a ${linked.length} thème(s). Tout supprimer ?`
+    : "Supprimer ce domaine ?";
+  if (!confirm(msg)) return;
+  await Promise.all(linked.map(t => deleteDoc(doc(db, "themes", t.id))));
+  await deleteDoc(doc(db, "domains", id));
+  await refreshDomains();
+  toast("Domaine supprimé", "success");
+}
+
+function editTheme(id, name) {
+  const n = prompt("Nouveau nom :", name);
+  if (!n || n.trim() === name) return;
+  updateDoc(doc(db, "themes", id), { name: n.trim() })
+    .then(() => { refreshDomains(); toast("Thème renommé ✓", "success"); });
+}
+
+async function delTheme(id) {
+  if (!confirm("Supprimer ce thème ?")) return;
+  await deleteDoc(doc(db, "themes", id));
+  await refreshDomains();
+  toast("Thème supprimé", "success");
+}
+
+function renderTree() {
+  const c = document.getElementById('domain-tree');
+  if (!allDomains.length) {
+    c.innerHTML = '<div class="empty-tree">Aucun domaine — crée le premier</div>'; return;
+  }
+  c.innerHTML = allDomains.map(d => {
+    const themes = allThemes.filter(t => t.domainId === d.id);
+    return `<div class="domain-block">
+      <div class="domain-row">
+        <span class="domain-name">${esc(d.name)}</span>
+        <span class="theme-count">${themes.length} thème${themes.length!==1?'s':''}</span>
+        <button class="icon-btn" onclick="window.editDomain('${d.id}','${esc(d.name)}')" title="Renommer">✎</button>
+        <button class="icon-btn danger" onclick="window.delDomain('${d.id}')" title="Supprimer">✕</button>
+      </div>
+      <div class="themes-row">
+        ${themes.length ? themes.map(t => `
+          <span class="theme-chip">
+            ${esc(t.name)}
+            <button class="chip-btn" onclick="window.editTheme('${t.id}','${esc(t.name)}')" title="Renommer">✎</button>
+            <button class="chip-btn del" onclick="window.delTheme('${t.id}')" title="Supprimer">✕</button>
+          </span>`).join('') : '<span class="no-themes">Aucun thème</span>'}
+      </div>
+    </div>`;
+  }).join('');
+}
+
+function fillDomainSelects() {
+  const opts = '<option value="">— Domaine —</option>' +
+    allDomains.map(d => `<option value="${d.id}">${esc(d.name)}</option>`).join('');
+  document.getElementById('f-domain').innerHTML = opts;
+  document.getElementById('t-domain').innerHTML = '<option value="">— Domaine parent —</option>' +
+    allDomains.map(d => `<option value="${d.id}">${esc(d.name)}</option>`).join('');
+  filterThemes();
+}
+
+function filterThemes() {
+  const domainId = document.getElementById('f-domain').value;
+  const filtered = domainId ? allThemes.filter(t => t.domainId === domainId) : allThemes;
+  document.getElementById('f-theme').innerHTML =
+    '<option value="">— Thème —</option>' +
+    filtered.map(t => `<option value="${t.id}">${esc(t.name)}</option>`).join('');
+}
+
+// ═══════════════════════════════════════════════
+// NAVIGATION
+// ═══════════════════════════════════════════════
+function showPanel(name) {
+  document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+  document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
+  document.getElementById('panel-' + name).classList.add('active');
+  const navMap = { subjects:'nav-subjects', form:'nav-subjects', domains:'nav-domains' };
+  const navEl = document.getElementById(navMap[name]);
+  if (navEl) navEl.classList.add('active');
+  // Scroll en haut du formulaire à chaque ouverture
+  if (name === 'form') {
+    setTimeout(() => {
+      const fb = document.getElementById('form-body');
+      if (fb) fb.scrollTop = 0;
+    }, 10);
+  }
+}
+
+// ═══════════════════════════════════════════════
+// UTILITAIRES
+// ═══════════════════════════════════════════════
+function esc(str) {
+  if (!str) return '';
+  return String(str)
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;')
+    .replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+function toast(msg, type='success') {
+  const t = document.getElementById('toast');
+  const colors = { success:'var(--green)', error:'var(--red)', info:'var(--accent)' };
+  t.style.borderColor = colors[type] || colors.success;
+  t.querySelector('.toast-icon').textContent = type === 'error' ? '✕' : '✓';
+  t.querySelector('.toast-msg').textContent  = msg;
+  t.classList.add('show');
+  setTimeout(() => t.classList.remove('show'), 3000);
+}
+
+// ═══════════════════════════════════════════════
+// EXPOSITION SUR WINDOW (pour les onclick HTML)
+// ═══════════════════════════════════════════════
+Object.assign(window, {
+  showPanel, openNew, openEdit, deleteSubject, saveSubject,
+  addSlide, removeSlide, moveSlide,
+  addQuestion, removeQuestion, setCorrect,
+  saveDomain, saveTheme, editDomain, delDomain, editTheme, delTheme,
+  filterThemes
+});
+
+// ═══════════════════════════════════════════════
+// DÉMARRAGE
+// ═══════════════════════════════════════════════
+window.addEventListener('DOMContentLoaded', async () => {
+  toast("Connexion à Firebase...", "info");
+  await refreshDomains();
+  await refreshSubjects();
+  toast("Knowie connecté ✓", "success");
+
+  // Upload image
+  document.getElementById('f-image-file').addEventListener('change', async e => {
+    const file = e.target.files[0];
+    if (!file) return;
+    try {
+      const url = await uploadImage(file);
+      document.getElementById('f-image-url').value = url;
+      const p = document.getElementById('image-preview');
+      p.src = url; p.style.display = 'block';
+    } catch { toast("Erreur upload image", "error"); }
+  });
+
+  // Filtre thèmes quand on change le domaine
+  document.getElementById('f-domain').addEventListener('change', filterThemes);
+
+  // Recherche
+  document.getElementById('search-input').addEventListener('input', e => {
+    const q = e.target.value.toLowerCase();
+    document.querySelectorAll('#subjects-tbody tr').forEach(r => {
+      r.style.display = r.textContent.toLowerCase().includes(q) ? '' : 'none';
+    });
+  });
+});
+</script>
 </head>
 <body>
 
-<!-- ══ SIDEBAR ══════════════════════════════════ -->
+<!-- ═══ SIDEBAR ═══════════════════════════════════════ -->
 <nav class="sidebar">
   <div class="logo">
     <div class="logo-name">Knowie</div>
     <div class="logo-sub">Admin</div>
   </div>
   <div class="firebase-badge">
-    <span class="dot-live"></span> Firebase live
+    <span class="dot"></span> Firebase live
   </div>
-
-  <div class="nav-section">
-    <div class="nav-label">Contenu</div>
-    <button class="nav-item active" id="nav-subjects" onclick="showPanel('panel-subjects')">
-      <span class="nav-icon">✦</span> Fiches
-    </button>
-    <button class="nav-item" id="nav-domains" onclick="showPanel('panel-domains')">
-      <span class="nav-icon">◎</span> Domaines & Thèmes
-    </button>
-  </div>
-
-  <div style="margin-top:auto;padding:14px 24px;border-top:1px solid var(--border);color:var(--text-muted);font-size:11px;line-height:1.6;">
-    Projet<br>
-    <span style="color:var(--accent);font-weight:500;">knowie-77fde</span>
+  <div class="nav-label">Contenu</div>
+  <button class="nav-item active" id="nav-subjects" onclick="showPanel('subjects')">
+    <span>✦</span> Fiches
+  </button>
+  <button class="nav-item" id="nav-domains" onclick="showPanel('domains')">
+    <span>◎</span> Domaines & Thèmes
+  </button>
+  <div class="sidebar-footer">
+    Projet Firebase<br>
+    <span style="color:var(--accent);font-weight:500">knowie-77fde</span>
   </div>
 </nav>
 
-<!-- ══ MAIN ════════════════════════════════════ -->
+<!-- ═══ MAIN ══════════════════════════════════════════ -->
 <main class="main">
 
-  <!-- ── PANNEAU 1 : liste des fiches ── -->
+  <!-- ── PANNEAU : LISTE DES FICHES ── -->
   <div class="panel active" id="panel-subjects">
     <div class="panel-header">
       <div>
         <div class="page-title">Fiches</div>
         <div class="page-sub">Tout le contenu de Knowie</div>
       </div>
-      <button class="btn btn-primary" onclick="openAddSubject()">+ Nouvelle fiche</button>
+      <button class="btn btn-primary" onclick="openNew()">+ Nouvelle fiche</button>
     </div>
     <div class="table-top">
-      <div class="table-title" id="subjects-count">Chargement...</div>
-      <input class="search-input" id="search-input" placeholder="🔍  Rechercher une fiche...">
+      <div class="table-count" id="subjects-count">Chargement...</div>
+      <input class="search-input" id="search-input" placeholder="🔍  Rechercher...">
     </div>
     <div class="table-wrap">
       <table>
         <thead>
-          <tr><th>Titre</th><th>Domaine</th><th>Thème</th><th>Statut</th><th>Accès</th><th>Actions</th></tr>
+          <tr>
+            <th>Titre</th><th>Domaine</th><th>Thème</th>
+            <th>Statut</th><th>Accès</th><th>Actions</th>
+          </tr>
         </thead>
         <tbody id="subjects-tbody">
           <tr><td colspan="6" style="text-align:center;padding:30px;color:var(--text-muted)">Connexion...</td></tr>
@@ -709,20 +770,20 @@ td{padding:12px 20px;color:var(--text-soft);font-size:13.5px;vertical-align:midd
     </div>
   </div>
 
-  <!-- ── PANNEAU 2 : formulaire de fiche ── -->
+  <!-- ── PANNEAU : FORMULAIRE FICHE ── -->
   <div class="panel" id="panel-form">
     <div class="form-header">
-      <button class="btn btn-ghost btn-sm" onclick="closeSubjectForm()">← Retour</button>
+      <button class="btn btn-ghost btn-sm" onclick="showPanel('subjects')">← Retour</button>
       <div class="form-header-title" id="form-title">Nouvelle fiche</div>
-      <button class="btn btn-primary" id="save-subject-btn" onclick="saveSubject()">Enregistrer la fiche</button>
+      <button class="btn btn-primary" id="save-btn" onclick="saveSubject()">Enregistrer la fiche</button>
     </div>
 
-    <div class="form-body">
+    <div class="form-body" id="form-body">
       <form id="subject-form" onsubmit="return false">
 
-        <!-- CLASSIFICATION -->
-        <div class="section-title">Classification</div>
-        <div class="form-row">
+        <!-- Classification -->
+        <div class="section-label">Classification</div>
+        <div class="form-row" style="margin-bottom:14px">
           <div class="form-group">
             <label class="form-label">Domaine *</label>
             <select class="form-select" id="f-domain">
@@ -730,7 +791,7 @@ td{padding:12px 20px;color:var(--text-soft);font-size:13.5px;vertical-align:midd
             </select>
           </div>
           <div class="form-group">
-            <label class="form-label">Thème * <span class="hint">(se filtre selon le domaine)</span></label>
+            <label class="form-label">Thème *</label>
             <select class="form-select" id="f-theme">
               <option value="">— Choisis d'abord un domaine —</option>
             </select>
@@ -762,54 +823,61 @@ td{padding:12px 20px;color:var(--text-soft);font-size:13.5px;vertical-align:midd
           </div>
         </div>
 
-        <!-- CONTENU -->
-        <div class="section-title">① Titre</div>
+        <!-- ① Titre -->
+        <div class="section-label">① Titre</div>
         <div class="form-group">
-          <label class="form-label">Titre de la fiche *</label>
-          <input class="form-input" id="f-title" placeholder="ex : Le biais d'ancrage — pourquoi le premier chiffre n'est jamais innocent">
+          <input class="form-input" id="f-title"
+            placeholder="ex : Le biais d'ancrage — pourquoi le premier chiffre n'est jamais innocent">
         </div>
 
-        <div class="section-title">② Pourquoi c'est important</div>
-        <div class="form-group">
-          <label class="form-label">L'impact <span class="hint">— 2-3 phrases : à quoi ça sert de savoir ça, qu'est-ce que ça change</span></label>
-          <textarea class="form-textarea" id="f-importance"
-            placeholder="Pourquoi ce sujet mérite 5 minutes d'attention ? Quel impact concret dans la vie de quelqu'un ?"></textarea>
+        <!-- ② Pourquoi c'est important -->
+        <div class="section-label">
+          ② Pourquoi c'est important
+          <span class="section-hint">— chaque slide = un écran dans l'app</span>
         </div>
+        <div class="blocks-container" id="slides-importance"></div>
+        <button type="button" class="btn btn-secondary btn-sm"
+          onclick="addSlide('importance')">+ Ajouter une slide</button>
 
-        <div class="section-title">③ Explication détaillée</div>
-        <div class="form-group">
-          <label class="form-label">Le fond du sujet <span class="hint">— recherches scientifiques si pertinent, exemple du quotidien tissé dedans</span></label>
-          <textarea class="form-textarea tall" id="f-explanation"
-            placeholder="Explique le sujet en profondeur.
-Intègre l'exemple directement dans l'explication, au moment où ça devient abstrait.
-Si tu as des études ou recherches, cite-les ici."></textarea>
+        <!-- ③ Explication détaillée -->
+        <div class="section-label">
+          ③ Explication détaillée
+          <span class="section-hint">— une idée par slide, exemple tissé dedans</span>
         </div>
+        <div class="blocks-container" id="slides-explanation"></div>
+        <button type="button" class="btn btn-secondary btn-sm"
+          onclick="addSlide('explanation')">+ Ajouter une slide</button>
 
-        <div class="section-title">④ Le détail qui surprend</div>
-        <div class="form-group">
-          <label class="form-label">1 fait inattendu <span class="hint">— contre-intuitif, peu connu, qui marque</span></label>
-          <textarea class="form-textarea" id="f-surprise"
-            placeholder="Le détail qu'on ne s'attend pas à apprendre, et qu'on va répéter à quelqu'un ce soir..."></textarea>
+        <!-- ④ Le détail qui surprend -->
+        <div class="section-label">
+          ④ Le détail qui surprend
+          <span class="section-hint">— 1 ou 2 slides max</span>
         </div>
+        <div class="blocks-container" id="slides-surprise"></div>
+        <button type="button" class="btn btn-secondary btn-sm"
+          onclick="addSlide('surprise')">+ Ajouter une slide</button>
 
-        <div class="section-title">⑤ Référence</div>
-        <div class="form-group">
-          <label class="form-label">Film, série, livre, docu <span class="hint">— 1 seule, bien développée</span></label>
-          <textarea class="form-textarea" id="f-reference"
-            placeholder="ex : 🎬 Black Mirror, épisode Nosedive — montre comment la dopamine sociale crée une dépendance à la validation..."></textarea>
+        <!-- ⑤ Référence -->
+        <div class="section-label">
+          ⑤ Référence
+          <span class="section-hint">— film, série, livre, docu</span>
         </div>
+        <div class="blocks-container" id="slides-reference"></div>
+        <button type="button" class="btn btn-secondary btn-sm"
+          onclick="addSlide('reference')">+ Ajouter une slide</button>
 
-        <div class="section-title">⑥ À retenir</div>
+        <!-- ⑥ À retenir -->
+        <div class="section-label">⑥ À retenir</div>
         <div class="form-group">
-          <label class="form-label">1 seule phrase <span class="hint">— mémorable, répétable, le test : est-ce que je peux l'expliquer en 20 secondes ?</span></label>
           <input class="form-input" id="f-takeaway"
-            placeholder="ex : Ton cerveau ne mesure pas la probabilité d'un événement — il mesure à quelle vitesse il peut en trouver un exemple.">
+            placeholder="1 seule phrase, mémorable, répétable en 20 secondes...">
+          <div class="form-hint">La phrase que l'utilisateur emporte avec lui après avoir lu la fiche.</div>
         </div>
 
-        <!-- IMAGE -->
-        <div class="section-title">Image d'illustration</div>
+        <!-- Image -->
+        <div class="section-label">Image d'illustration</div>
         <div class="form-group">
-          <div class="image-upload-zone">
+          <div class="upload-zone">
             <input type="file" id="f-image-file" accept="image/*">
             <div class="upload-label">
               <strong>Clique ici</strong> ou glisse une image<br>
@@ -818,25 +886,27 @@ Si tu as des études ou recherches, cite-les ici."></textarea>
           </div>
           <div id="upload-progress"></div>
           <img id="image-preview" alt="Aperçu">
-          <div class="image-url-row">
-            <input class="form-input" id="f-image-url" placeholder="ou colle directement une URL d'image ici" style="font-size:12px;color:var(--text-muted)">
-          </div>
+          <input class="form-input" id="f-image-url"
+            placeholder="ou colle directement une URL d'image"
+            style="margin-top:10px;font-size:12px;color:var(--text-muted)">
         </div>
 
-        <!-- QUIZ -->
-        <div class="section-title">⑦ Quiz <span style="font-weight:300;font-size:11px;color:var(--text-muted);letter-spacing:0;text-transform:none">— 3 questions qui font réfléchir, pas mémoriser</span></div>
-        <div id="quiz-container">
-          <div class="empty-quiz">Aucune question — clique sur "Ajouter une question"</div>
+        <!-- ⑦ Quiz -->
+        <div class="section-label">
+          ⑦ Quiz
+          <span class="section-hint">— 3 questions qui font réfléchir, pas mémoriser</span>
         </div>
-        <button type="button" class="btn btn-secondary btn-sm" style="margin-top:12px" onclick="addQuizQuestion()">
-          + Ajouter une question
-        </button>
+        <div id="quiz-container">
+          <div class="empty-quiz">Aucune question — clique sur "+ Ajouter une question"</div>
+        </div>
+        <button type="button" class="btn btn-secondary btn-sm" style="margin-top:10px"
+          onclick="addQuestion()">+ Ajouter une question</button>
 
       </form>
     </div>
   </div>
 
-  <!-- ── PANNEAU 3 : domaines & thèmes ── -->
+  <!-- ── PANNEAU : DOMAINES & THÈMES ── -->
   <div class="panel" id="panel-domains">
     <div class="panel-header">
       <div>
@@ -844,8 +914,7 @@ Si tu as des études ou recherches, cite-les ici."></textarea>
         <div class="page-sub">Hiérarchie : Domaine → Thème → Fiche</div>
       </div>
     </div>
-
-    <div class="domains-body">
+    <div class="domains-grid">
 
       <!-- Créer un domaine -->
       <div class="create-card">
@@ -863,19 +932,19 @@ Si tu as des études ou recherches, cite-les ici."></textarea>
         <div class="form-group">
           <label class="form-label">À quel domaine appartient ce thème ?</label>
           <select class="form-select" id="t-domain">
-            <option value="">— Choisir un domaine —</option>
+            <option value="">— Domaine —</option>
           </select>
         </div>
         <div class="form-group">
           <label class="form-label">Nom du thème</label>
-          <input class="form-input" id="t-name" placeholder="ex : Neurosciences">
+          <input class="form-input" id="t-name" placeholder="ex : Biais cognitifs">
         </div>
         <button class="btn btn-primary btn-sm" onclick="saveTheme()">Créer le thème</button>
       </div>
 
-      <!-- Arbre domaines/thèmes — s'étend sur toute la largeur -->
-      <div class="domain-tree-wrap" style="grid-column:1/-1;">
-        <div class="domain-tree-title">Structure actuelle</div>
+      <!-- Arbre domaines/thèmes -->
+      <div class="tree-card">
+        <div class="tree-title">Structure actuelle</div>
         <div id="domain-tree">
           <div class="empty-tree">Chargement...</div>
         </div>
@@ -886,9 +955,10 @@ Si tu as des études ou recherches, cite-les ici."></textarea>
 
 </main>
 
+<!-- Toast -->
 <div class="toast" id="toast">
   <span class="toast-icon">✓</span>
-  <span id="toast-msg">OK</span>
+  <span class="toast-msg">OK</span>
 </div>
 
 </body>
